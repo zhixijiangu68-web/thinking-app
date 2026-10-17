@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-DEFAULT_UNIVERSE_FILE = Path(__file__).resolve().parent.parent / "universe" / "jp-large.txt"
+DEFAULT_UNIVERSE_FILE = Path(__file__).resolve().parent.parent / "universe" / "jp-wide.txt"   # 2026-10-17 に 67 銘柄 → 266 銘柄
 DEFAULT_BENCHMARK = "^N225"
 
 
