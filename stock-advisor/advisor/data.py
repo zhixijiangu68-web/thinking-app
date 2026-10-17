@@ -200,6 +200,20 @@ def sanity_report(prices: pd.DataFrame, *, jump: float = 0.30, stale_days: int =
     return issues
 
 
+def suspicious_tickers(prices: pd.DataFrame, *, jump: float = 0.60) -> dict[str, str]:
+    """全期間で1日に ±jump 以上動いた銘柄（分割・併合の未調整、上場初日の誤データなど）。
+    {銘柄: 説明}。判断の前に候補から外す（値動きの良し悪しではなく、データの信頼性で外す）。"""
+    out: dict[str, str] = {}
+    chg = prices.ffill().pct_change()
+    for t in prices.columns:
+        c = chg[t]
+        bad = c[c.abs() >= jump].dropna()
+        if not bad.empty:
+            d, v = bad.abs().idxmax(), bad.loc[bad.abs().idxmax()]
+            out[t] = f"{d.date()} に {v:+.0%}（{len(bad)} 回）"
+    return out
+
+
 def synthetic_prices(
     tickers: list[str], start: str = "2015-01-01", end: str | None = None, seed: int = 0
 ) -> pd.DataFrame:

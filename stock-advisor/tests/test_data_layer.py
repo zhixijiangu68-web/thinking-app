@@ -136,3 +136,12 @@ def test_load_prices_raises_when_nothing(monkeypatch, tmp_path):
 
 def test_index_ticker_cache_filename(tmp_path):
     assert D._cache_path(tmp_path, "^N225").name == "_idx_N225.csv"
+
+
+def test_suspicious_tickers_flags_split_like_jumps():
+    idx = pd.bdate_range("2020-01-01", periods=300)
+    px = pd.DataFrame({"OK": np.linspace(100, 150, 300), "BAD": np.linspace(100, 150, 300)}, index=idx)
+    px.loc[idx[150]:, "BAD"] *= 3.0     # 分割の未調整のような +200%
+    bad = D.suspicious_tickers(px)
+    assert list(bad) == ["BAD"] and "+200%" in bad["BAD"]
+    assert D.suspicious_tickers(px[["OK"]]) == {}

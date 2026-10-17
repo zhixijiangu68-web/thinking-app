@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 
 from .backtest import run_backtest, sweep_costs, sweep_variants
-from .data import load_prices, sanity_report
+from .data import load_prices, sanity_report, suspicious_tickers
 from .engine import StepReport, daily_step, last_prices
 from .portfolio import DEFAULT_PORTFOLIO_FILE, Order, Portfolio
 from .strategy import StrategyConfig, compute_features, select_at
@@ -43,6 +43,17 @@ def _load(args, start: str, extra: list[str] | None = None):
     sectors = {t: s for t, (_, s) in info.items()}
     tickers = list(info) + [t for t in (extra or []) if t not in info]   # 保有している銘柄がリストから外れても株価は取る
     prices = load_prices(tickers, start=start, synthetic=args.synthetic, refresh=args.refresh, seed=args.seed)
+    bad = suspicious_tickers(prices)
+    held = set(extra or [])
+    drop = [t for t in bad if t not in held]
+    if drop:
+        print("データが疑わしいので候補から外した（1日に ±60% 以上の値動き）: "
+              + "、".join(f"{t} {names.get(t, '')} {bad[t]}" for t in drop), file=sys.stderr)
+        prices = prices.drop(columns=drop)
+    args._dropped = [f"{t} {names.get(t, '')} {bad[t]}" for t in drop]
+    for t in bad:
+        if t in held:
+            print(f"保有中の {t} のデータが疑わしい（{bad[t]}）。手で確かめる", file=sys.stderr)
     bench = None
     if True:  # 比較のため日経平均はいつも取る（地合いの判定に使うのは --regime のときだけ）
         b = load_prices([DEFAULT_BENCHMARK], start=start, synthetic=args.synthetic, refresh=args.refresh, seed=args.seed + 1)
@@ -351,6 +362,7 @@ def cmd_research(args) -> int:
     out = R.run_all(prices, bench, sectors, bootstrap_runs=args.bootstrap, weight_runs=args.weights,
                     cost=args.cost, split=args.split, log=lambda m: print(m, file=sys.stderr))
     out["split"] = args.split
+    out["dropped"] = getattr(args, "_dropped", [])
     text = R.report(out, title=f"1000回の検証（{prices.index[0].date()}〜{prices.index[-1].date()}、{len(prices.columns)} 銘柄）")
     print(text)
     if args.save:

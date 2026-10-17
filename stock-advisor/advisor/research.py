@@ -292,5 +292,8 @@ def report(out: dict, title: str = "1000回の検証") -> str:
     L.append(f"年率 {F['cagr'].min():+.1%}〜{F['cagr'].max():+.1%}、シャープ {F['sharpe'].min():.2f}〜{F['sharpe'].max():.2f}。最良: " +
              ", ".join(f"上位{int(r.top)}/業種{int(r.sector_cap)}/上限{r.max_weight:.0%} {r.cagr:+.1%}" for r in F.sort_values("sharpe", ascending=False).head(3).itertuples()))
     L.append("")
+    if out.get("dropped"):
+        L.append("データが疑わしいので外した銘柄: " + "、".join(out["dropped"]))
+        L.append("")
     L.append("※ 候補は今の大型株（生存バイアス）。日次終値・片道 0.1%。合格基準は検証の前に docs/composite-20261017.md に書いたもので、あとから動かしていない。")
     return "\n".join(L) + "\n"
