@@ -200,3 +200,122 @@ def test_portfolio_old_file_without_new_fields(tmp_path):
     f.write_text(json.dumps({"cash": 5.0, "positions": {}, "avg_cost": {}, "history": [], "created": "x"}))
     back = Portfolio.load(f)
     assert not back.halted and back.last_rebalance == "" and back.peak_equity == 0.0
+
+
+# ---------- 検証ラウンド2: 現実との差（約定の遅れ・欠損・注文待ち） ----------
+from advisor.backtest import exit_quality
+from advisor.data import sanity_report, _is_fresh
+from advisor.portfolio import fill_pending, queue_orders
+
+
+def test_lag_changes_result_but_not_signals(prices, bench):
+    cfg = StrategyConfig(top_n=3)
+    r0 = run_backtest(prices, bench, cfg, execution_lag=0)
+    r1 = run_backtest(prices, bench, cfg, execution_lag=1)
+    # 同じ判断（入れ替えの銘柄）で、約定日が1日ずれる
+    a = r0.trades[r0.trades.why == "rebalance"][["ticker", "to"]].head(3).values.tolist()
+    b = r1.trades[r1.trades.why == "rebalance"][["ticker", "to"]].head(3).values.tolist()
+    assert a == b
+    d0 = r0.trades[r0.trades.why == "rebalance"].date.iloc[0]
+    d1 = r1.trades[r1.trades.why == "rebalance"].date.iloc[0]
+    assert prices.index.get_loc(d1) == prices.index.get_loc(d0) + 1
+    assert np.isfinite(r1.metrics["cagr"]) and 0 < r1.metrics["time_in_market"] <= 1
+
+
+def test_missing_price_forces_exit(prices, bench):
+    cfg = StrategyConfig(top_n=3, use_regime=False, max_missing_days=5)
+    feats = compute_features(prices, None, cfg)
+    d = prices.index[300]
+    held = select_at(feats, prices, d, cfg).picks[0].ticker
+    px = prices.copy()
+    px.loc[prices.index[320]:, held] = np.nan
+    res = run_backtest(px, None, cfg)
+    assert res.metrics["exit_missing"] >= 1
+    t = res.trades[(res.trades.ticker == held) & (res.trades.why == "missing")]
+    assert not t.empty
+    # 4日の欠損では退出しない
+    sig = exit_signals(feats, px, prices.index[323], cfg, {held: 1.0})
+    assert sig == []
+    sig = exit_signals(feats, px, prices.index[325], cfg, {held: 1.0})
+    assert [s.reason for s in sig] == ["missing"]
+
+
+def test_sector_cap_strict(prices):
+    cfg = StrategyConfig(top_n=5, max_per_sector=2, use_regime=False)
+    feats = compute_features(prices, None, cfg)
+    sel = select_at(feats, prices, prices.index[-1], cfg, {t: "X" for t in TICKERS})
+    assert len(sel.picks) <= 2
+    if sel.eligible > 2:
+        assert len(sel.picks) == 2 and len(sel.sector_skipped) >= 1
+
+
+def test_pending_orders_fill_next_day_only():
+    pf = Portfolio(cash=1_000_000)
+    queue_orders(pf, [Order("A", "buy", 100, 1000.0, "x")], "2026-10-16")
+    assert fill_pending(pf, {"A": 1000.0}, "2026-10-16") == []        # 同じ日は約定しない
+    assert pf.pending and pf.cash == 1_000_000
+    filled = fill_pending(pf, {"A": 1200.0}, "2026-10-17")            # 翌日、値上がりして約定
+    assert filled[0].price == 1200.0 and pf.positions["A"] == 100 and pf.pending == []
+    # 値上がりで現金が足りなければ単元ずつ減らす
+    pf2 = Portfolio(cash=250_000)
+    queue_orders(pf2, [Order("A", "buy", 200, 1000.0, "x")], "2026-10-16")
+    f = fill_pending(pf2, {"A": 1300.0}, "2026-10-17")
+    assert f[0].shares == 100 and pf2.cash == 250_000 - 130_000
+    # 株価がとれなければ待ったまま、売りは保有以上にならない
+    pf3 = Portfolio(cash=0, positions={"B": 100}, avg_cost={"B": 1.0})
+    queue_orders(pf3, [Order("B", "sell", 300, 1.0, "x"), Order("C", "buy", 100, 1.0, "x")], "2026-10-16")
+    f = fill_pending(pf3, {"B": 2.0}, "2026-10-17")
+    assert f[0].shares == 100 and pf3.cash == 200 and [p["ticker"] for p in pf3.pending] == ["C"]
+    # 同じ銘柄の新しい注文は古いものを置き換える
+    queue_orders(pf3, [Order("C", "buy", 200, 1.0, "y")], "2026-10-17")
+    assert len(pf3.pending) == 1 and pf3.pending[0]["shares"] == 200
+
+
+def test_sanity_report_flags_jump_stale_short(prices):
+    px = prices.copy()
+    px.loc[px.index[-10], TICKERS[0]] *= 1.5                 # +50%
+    px.loc[px.index[-8]:, TICKERS[1]] = np.nan               # 8日とれない
+    px["NEW"] = np.nan; px.loc[px.index[-30]:, "NEW"] = 100.0  # 履歴30日
+    kinds = {(i.ticker, i.kind) for i in sanity_report(px)}
+    assert (TICKERS[0], "jump") in kinds
+    assert (TICKERS[1], "stale") in kinds
+    assert ("NEW", "short") in kinds
+    assert not any(i.kind == "jump" for i in sanity_report(prices) if i.ticker == TICKERS[2])
+
+
+def test_cache_freshness_uses_business_days():
+    import datetime as dt
+    s = pd.Series([1.0], index=pd.DatetimeIndex(["2026-10-16"]))   # 金曜の終値
+    assert _is_fresh(s, today=dt.date(2026, 10, 17))   # 土曜
+    assert _is_fresh(s, today=dt.date(2026, 10, 18))   # 日曜
+    assert _is_fresh(s, today=dt.date(2026, 10, 19))   # 月曜の朝（前営業日は金曜）
+    assert not _is_fresh(s, today=dt.date(2026, 10, 20))  # 火曜（月曜の終値がない）
+
+
+def test_plan_orders_invariants_random():
+    """ランダムな口座と株価で、注文が壊れた状態を作らないこと。"""
+    rng = np.random.default_rng(42)
+    for _ in range(300):
+        names = [f"S{i}" for i in range(8)]
+        px = {t: float(rng.integers(300, 60000)) for t in names}
+        pos = {t: int(rng.integers(0, 6)) * 100 for t in rng.choice(names, 3, replace=False)}
+        pos = {t: n for t, n in pos.items() if n}
+        pf = Portfolio(cash=float(rng.integers(0, 5_000_000)), positions=pos, avg_cost={t: px[t] for t in pos})
+        targets = list(rng.choice(names, int(rng.integers(0, 6)), replace=False))
+        reserve = float(rng.integers(0, 200_000))
+        orders, skipped = plan_orders(pf, targets, px, lot=100, cash_reserve=reserve)
+        tickers = [o.ticker for o in orders]
+        assert len(tickers) == len(set(tickers)), "同じ銘柄に2つの注文"
+        for o in orders:
+            assert o.shares > 0 and o.shares % 100 == 0
+            if o.side == "sell":
+                assert o.shares <= pf.positions.get(o.ticker, 0)
+        sim = Portfolio(cash=pf.cash, positions=dict(pf.positions), avg_cost=dict(pf.avg_cost))
+        PaperBroker(sim).execute(orders)        # 現金不足なら ValueError
+        assert sim.cash >= reserve - 1e-6 or not any(o.side == "buy" for o in orders)
+        for t in sim.positions:
+            assert t in targets, "対象外の銘柄が残った"
+        assert all(t in targets for t in skipped)
+
+
+from advisor.broker import PaperBroker  # noqa: E402  (上のテストで使う)

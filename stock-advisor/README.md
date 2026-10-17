@@ -16,6 +16,8 @@
 | `python -m advisor paper status` | 紙上の口座の損益 |
 | `python -m advisor paper resume --why '…'` | 遮断器で止まった口座を、理由を記録して再開する |
 
+紙上の注文は**判断した日の引け後に出し、翌営業日の終値で約定**する（実際の発注と同じ順番。`--fill-now` で当日約定）。株価が1日で ±30% 動いた・最近の株価がとれない銘柄は「データの確認が必要」として出す。
+
 GitHub Actions（`.github/workflows/stock-screen.yml`）が平日 17:10 JST に `screen --save` を回して `reports/<日付>.md` に候補を残し、`data/paper-portfolio.json` がコミットされていれば `paper auto` で紙上の口座も回す。
 
 **考え方・ルールの理由・リスクヘッジは [docs/design.md](docs/design.md)。** 要点: 当てる道具ではなく「負けない形を守る」道具。土台は指数の積み立て、これは衛星。
@@ -56,7 +58,9 @@ python -m advisor paper rebalance            # 紙上で約定させる（data/p
 ## 判断は後で見直せるように
 
 - `screen` は「なぜその銘柄か」（モメンタム・変動率・トレンド）を表で出す
-- `backtest` は先読みをしない（その日の終値までの情報で判断し、翌日以降の値動きに反映する）
+- `backtest` は先読みをしない（その日の終値までの情報で判断し、翌営業日の終値で約定する。`--lag 0` で当日約定の楽観的な数字も見られる）
+- `backtest --by-year` で年ごとのリターン、`--sweep` で隣の値との比較。「退出して正解だった割合」（売った後21営業日で下がった割合）も出す
+- 株価がとれなくなった銘柄（上場廃止・データ障害）は5営業日で最後の値で退出扱いにする
 - 紙上の売買は `data/paper-portfolio.json` の `history` に全部残る
 
 ## 実際の発注につなぐとき（まだやらない）
@@ -71,7 +75,7 @@ python -m advisor paper rebalance            # 紙上で約定させる（data/p
 ## 確認
 
 ```bash
-python -m pytest -q tests        # 17件（先読みなし・業種の上限・退出・遮断器・単元株の丸め・現金不足・保存と復元）
+python -m pytest -q tests        # 24件（先読みなし・約定の遅れ・業種の上限・退出・遮断器・欠損・注文待ち・単元株の丸め・現金不足・保存と復元・ランダム検査）
 python -m advisor --synthetic screen
 python -m advisor --synthetic backtest --sweep   # 隣の値でも検証（過学習の確認）
 ```

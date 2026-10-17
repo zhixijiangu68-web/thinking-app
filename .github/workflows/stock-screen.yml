@@ -29,7 +29,7 @@ jobs:
       - name: 紙上の口座を回す（data/paper-portfolio.json がコミットされているときだけ）
         run: |
           if [ -f data/paper-portfolio.json ]; then
-            python -m advisor paper auto | tee -a "reports/$(date -u +%Y-%m-%d).md"
+            python -m advisor paper auto --save
           else
             echo "紙上の口座なし（paper init して data/paper-portfolio.json をコミットすると回る）"
           fi

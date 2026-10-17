@@ -35,6 +35,7 @@ class Portfolio:
     halted: bool = False            # 遮断器が動いた。人が `paper resume` するまで売買しない
     halted_reason: str = ""
     last_rebalance: str = ""        # 最後に入れ替えた日（YYYY-MM-DD）
+    pending: list[dict] = field(default_factory=list)  # 約定待ちの注文（判断した日の引け後に出し、翌営業日に約定）
 
     # --- 保存・読込 ---
     @classmethod
@@ -77,6 +78,39 @@ class Portfolio:
         else:
             raise ValueError(f"不明な side: {order.side}")
         self.history.append({"when": when, **asdict(order)})
+
+
+def queue_orders(pf: Portfolio, orders: list[Order], signal_date: str) -> None:
+    """注文を約定待ちにする（同じ銘柄の古い注文は置き換える）。"""
+    keep = [p for p in pf.pending if p["ticker"] not in {o.ticker for o in orders}]
+    pf.pending = keep + [{"signal_date": signal_date, **asdict(o)} for o in orders]
+
+
+def fill_pending(pf: Portfolio, prices: dict[str, float], when: str, *, lot: int = LOT_SIZE) -> list[Order]:
+    """約定待ちの注文を今日の株価で約定させる。買いは値上がりで現金が足りなければ単元ずつ減らす。
+    株価がとれない銘柄は待ったまま。売りを先に。"""
+    filled: list[Order] = []
+    rest: list[dict] = []
+    todo = sorted(pf.pending, key=lambda p: 0 if p["side"] == "sell" else 1)
+    for p in todo:
+        t = p["ticker"]
+        if t not in prices or p.get("signal_date", "") >= when:
+            rest.append(p)   # 株価がとれない、または判断した日と同じ日（翌営業日まで待つ）
+            continue
+        px = prices[t]
+        n = int(p["shares"])
+        if p["side"] == "sell":
+            n = min(n, pf.positions.get(t, 0))
+        else:
+            while n > 0 and n * px > pf.cash + 1e-6:
+                n -= lot
+        if n <= 0:
+            continue
+        o = Order(t, p["side"], n, px, reason=p.get("reason", "") + f"（{p['signal_date']} の判断）")
+        pf.apply(o, when=when)
+        filled.append(o)
+    pf.pending = rest
+    return filled
 
 
 def plan_orders(

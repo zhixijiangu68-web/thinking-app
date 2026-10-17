@@ -32,6 +32,7 @@ class StrategyConfig:
     exit_below_trend: bool = True   # 保有銘柄が200日線を割ったら売る
     stop_loss: float = 0.20         # 取得値から −20% で売る（0 = 使わない）
     portfolio_dd_stop: float = 0.20 # 評価額が最高値から −20% で全部売って止める（0 = 使わない）
+    max_missing_days: int = 5       # 株価がこれ以上の営業日とれない銘柄は、最後の値で退出（上場廃止・データ障害）
 
     @property
     def min_history(self) -> int:
@@ -104,7 +105,10 @@ def _nearest_index(prices: pd.DataFrame, asof: pd.Timestamp) -> pd.Timestamp:
     asof = pd.Timestamp(asof)
     if asof in prices.index:
         return asof
-    return prices.index[prices.index.get_indexer([asof], method="pad")[0]]
+    pos = prices.index.get_indexer([asof], method="pad")[0]
+    if pos < 0:
+        raise ValueError(f"{asof.date()} より前の株価がありません（データの開始は {prices.index[0].date()}）")
+    return prices.index[pos]
 
 
 def select_at(
@@ -139,7 +143,7 @@ def select_at(
 @dataclass
 class ExitSignal:
     ticker: str
-    reason: str   # "trend" / "stop"
+    reason: str   # "trend" / "stop" / "missing"
     price: float
     change: float  # 取得値からの変化
 
@@ -151,11 +155,20 @@ def exit_signals(
     """毎日の退出判定。positions のうち売るべき銘柄を返す。"""
     asof = _nearest_index(prices, asof)
     out: list[ExitSignal] = []
+    pos = prices.index.get_loc(asof)
     for t, entry in positions.items():
         if t not in prices.columns:
             continue
         px = prices.at[asof, t]
         if pd.isna(px):
+            # 株価がとれない。しばらく続くなら最後の値で退出（売れるかは別問題なので、人が確かめる）
+            col = prices[t].iloc[: pos + 1]
+            last_valid = col.last_valid_index()
+            missing_days = pos - prices.index.get_loc(last_valid) if last_valid is not None else pos + 1
+            if cfg.max_missing_days and missing_days >= cfg.max_missing_days:
+                last_px = float(col.loc[last_valid]) if last_valid is not None else float(entry or 0.0)
+                chg = float(last_px / entry - 1.0) if entry and entry > 0 else 0.0
+                out.append(ExitSignal(t, "missing", last_px, chg))
             continue
         chg = float(px / entry - 1.0) if entry and entry > 0 else 0.0
         if cfg.exit_below_trend and not bool(feats.trend_ok.at[asof, t]):
