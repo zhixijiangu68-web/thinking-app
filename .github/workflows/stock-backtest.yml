@@ -2,6 +2,8 @@
 name: stock-backtest
 
 on:
+  push:
+    paths: [".github/workflows/stock-backtest.yml"]   # この file を push したときも動く（既定のブランチに入る前の確認用）
   workflow_dispatch:
     inputs:
       start:
