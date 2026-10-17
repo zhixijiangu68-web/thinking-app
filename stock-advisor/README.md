@@ -18,7 +18,7 @@
 
 紙上の注文は**判断した日の引け後に出し、翌営業日の終値で約定**する（実際の発注と同じ順番。`--fill-now` で当日約定）。株価が1日で ±30% 動いた・最近の株価がとれない銘柄は「データの確認が必要」として出す。
 
-GitHub Actions（`.github/workflows/stock-screen.yml`）が平日 17:10 JST に `screen --save` を回して `reports/<日付>.md` に候補を残し、`data/paper-portfolio.json` がコミットされていれば `paper auto` で紙上の口座も回す。
+GitHub Actions（`.github/workflows/stock-screen.yml`。スケジュールは既定のブランチに入ってから動く）が平日 17:10 JST に `screen --save` を回して `reports/<日付>.md` に候補を残し、`data/paper-portfolio.json` がコミットされていれば `paper auto` で紙上の口座も回す。
 
 **考え方・ルールの理由・リスクヘッジは [docs/design.md](docs/design.md)。** 要点: 当てる道具ではなく「負けない形を守る」道具。土台は指数の積み立て、これは衛星。
 

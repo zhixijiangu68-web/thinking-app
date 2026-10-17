@@ -158,6 +158,7 @@ def load_prices(
     if not series:
         raise RuntimeError("株価を1つも取得できませんでした。ネットワークとティッカーを確認してください。")
     df = pd.DataFrame(series).sort_index()
+    df.index.name = "Date"
     df = df.loc[pd.Timestamp(start):]
     if end:
         df = df.loc[: pd.Timestamp(end)]
