@@ -1,0 +1,51 @@
+# 手動で起動: 実データ（Yahoo Finance）で 2010 年からのバックテストと今日の候補を出し、reports/ にコミットする
+name: stock-backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "バックテストの開始日"
+        default: "2010-01-01"
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stock-advisor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: stock-advisor/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: 実データでバックテスト
+        run: |
+          mkdir -p reports
+          python -m advisor backtest --start "${{ github.event.inputs.start || '2010-01-01' }}" --sweep --by-year \
+            | tee "reports/backtest-$(date -u +%Y-%m-%d).md"
+      - name: 今日の候補
+        run: python -m advisor screen --save
+      - name: 取得できた銘柄の数
+        run: |
+          echo "キャッシュ: $(ls data/cache/*.csv | wc -l) 銘柄"
+          python - <<'PY'
+          from advisor.data import load_prices
+          from advisor.universe import load_universe
+          px = load_prices(list(load_universe()), start="2010-01-01")
+          print(px.shape, px.index[0].date(), px.index[-1].date())
+          print("履歴が短い:", [c for c in px.columns if px[c].notna().sum() < 2500])
+          PY
+      - name: reports/ をコミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          git diff --cached --quiet || git commit -m "stock-advisor: 実データのバックテスト $(date -u +%Y-%m-%d)"
+          git push
