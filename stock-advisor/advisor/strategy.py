@@ -1,14 +1,16 @@
-"""「どの株を買うか」「いつ退くか」を決めるルール。設計の理由は docs/design.md。
+"""「どの株を買うか」を決めるルール（順張りだけ。2026-10-17 オーナーの判断）。設計の理由は docs/design.md。
 
 買い（月1回の入れ替え日）:
-1. 地合い: ベンチマーク（日経平均）が 200日移動平均より上のときだけ株を持つ。下なら全部現金。
-2. 候補の条件: 株価が自分の 200日移動平均より上、年率の変動率が max_vol 以下、12-1モメンタムがプラス。
-3. 並べ方: 12か月の値上がり率（直近1か月を除く）が高い順。同じ業種は max_per_sector まで。
-4. 上位 top_n 銘柄を同じ金額ずつ持つ。
+1. 候補の条件: 株価が自分の 200日移動平均より上、年率の変動率が max_vol 以下、12-1モメンタムがプラス。
+2. 並べ方: 12か月の値上がり率（直近1か月を除く）が高い順。同じ業種は max_per_sector まで。
+3. 上位 top_n 銘柄を同じ金額ずつ持つ。残る銘柄は目標比率 ±rebalance_band 以内なら触らない。
+4. 条件を満たす銘柄が足りなければ、その分は現金。
 
-退出（毎日）:
-5. 保有銘柄が自分の 200日線を割ったら売る。取得値から stop_loss 下がっても売る。次の入れ替えまで現金。
-6. 口座の遮断器: 評価額が最高値から portfolio_dd_stop 下がったら全部売って止める（人が再開する）。
+守りの層（既定では使わない。実データで年率 10 ポイントを削っていた。フラグで戻せる）:
+- use_regime: 日経平均が 200日線の下なら全部現金
+- exit_below_trend / stop_loss: 毎日の退出（200日線割れ・取得値から −N%）
+- portfolio_dd_stop: 口座の遮断器（評価額が最高値から −N% で全部売って止める）
+株価がとれない銘柄の退出（max_missing_days）はデータの安全装置なので残す。
 """
 from __future__ import annotations
 
@@ -20,18 +22,18 @@ import pandas as pd
 
 @dataclass
 class StrategyConfig:
-    top_n: int = 5
+    top_n: int = 8
     mom_lookback: int = 252   # 約12か月
     mom_skip: int = 21        # 直近約1か月は除く
     trend_window: int = 200
     vol_window: int = 60
     max_vol: float = 0.60     # 年率60%を超える荒い銘柄は外す
     regime_window: int = 200
-    use_regime: bool = True
+    use_regime: bool = False        # 順張りだけ（既定）。True で地合いの判定
     max_per_sector: int = 2   # 同じ業種はここまで（0 = 制限なし）
-    exit_below_trend: bool = True   # 保有銘柄が200日線を割ったら売る
-    stop_loss: float = 0.20         # 取得値から −20% で売る（0 = 使わない）
-    portfolio_dd_stop: float = 0.20 # 評価額が最高値から −20% で全部売って止める（0 = 使わない）
+    exit_below_trend: bool = False  # 保有銘柄が200日線を割ったら売る（既定では使わない）
+    stop_loss: float = 0.0          # 取得値から −N% で売る（0 = 使わない）
+    portfolio_dd_stop: float = 0.0  # 評価額が最高値から −N% で全部売って止める（0 = 使わない）
     max_missing_days: int = 5       # 株価がこれ以上の営業日とれない銘柄は、最後の値で退出（上場廃止・データ障害）
     rebalance_band: float = 0.25    # 残る銘柄は、目標比率から ±25% 以内なら触らない（無駄な売買を減らす。0 = 毎回均等に戻す）
 

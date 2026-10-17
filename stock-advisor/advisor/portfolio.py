@@ -88,26 +88,41 @@ def queue_orders(pf: Portfolio, orders: list[Order], signal_date: str) -> None:
 
 
 def fill_pending(pf: Portfolio, prices: dict[str, float], when: str, *, lot: int = LOT_SIZE) -> list[Order]:
-    """約定待ちの注文を今日の株価で約定させる。買いは値上がりで現金が足りなければ単元ずつ減らす。
-    株価がとれない銘柄は待ったまま。売りを先に。"""
+    """約定待ちの注文を今日の株価で約定させる。売りを先に。
+    買いは、値上がりで現金が足りなければ全部の買いを比例で縮める（単元に丸める。バックテストと同じ扱い）。
+    株価がとれない銘柄と、判断した日と同じ日の注文は待ったまま。"""
     filled: list[Order] = []
     rest: list[dict] = []
-    todo = sorted(pf.pending, key=lambda p: 0 if p["side"] == "sell" else 1)
-    for p in todo:
-        t = p["ticker"]
-        if t not in prices or p.get("signal_date", "") >= when:
+    ready = []
+    for p in pf.pending:
+        if p["ticker"] not in prices or p.get("signal_date", "") >= when:
             rest.append(p)   # 株価がとれない、または判断した日と同じ日（翌営業日まで待つ）
-            continue
-        px = prices[t]
-        n = int(p["shares"])
-        if p["side"] == "sell":
-            n = min(n, pf.positions.get(t, 0))
         else:
-            while n > 0 and n * px > pf.cash + 1e-6:
-                n -= lot
+            ready.append(p)
+    # 1) 売り
+    for p in [q for q in ready if q["side"] == "sell"]:
+        t = p["ticker"]
+        n = min(int(p["shares"]), pf.positions.get(t, 0))
         if n <= 0:
             continue
-        o = Order(t, p["side"], n, px, reason=p.get("reason", "") + f"（{p['signal_date']} の判断）")
+        o = Order(t, "sell", n, prices[t], reason=p.get("reason", "") + f"（{p['signal_date']} の判断）")
+        pf.apply(o, when=when)
+        filled.append(o)
+    # 2) 買い: 合計が現金を超えるなら比例で縮める
+    buys = [q for q in ready if q["side"] == "buy"]
+    want = {q["ticker"]: int(q["shares"]) for q in buys}
+    total = sum(n * prices[t] for t, n in want.items())
+    if total > pf.cash + 1e-6 and total > 0:
+        ratio = pf.cash / total
+        want = {t: int(n * ratio // lot) * lot for t, n in want.items()}
+    for q in buys:
+        t = q["ticker"]
+        n = want[t]
+        while n > 0 and n * prices[t] > pf.cash + 1e-6:
+            n -= lot
+        if n <= 0:
+            continue
+        o = Order(t, "buy", n, prices[t], reason=q.get("reason", "") + f"（{q['signal_date']} の判断）")
         pf.apply(o, when=when)
         filled.append(o)
     pf.pending = rest

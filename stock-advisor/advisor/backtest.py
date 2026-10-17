@@ -78,6 +78,26 @@ def equal_weight_equity(prices: pd.DataFrame, days: pd.DatetimeIndex) -> pd.Seri
     return (1 + r).cumprod()
 
 
+def _planned_to_weights(plan: dict, weights: dict[str, float], filled: pd.DataFrame, d: pd.Timestamp, eq: float) -> dict[str, float]:
+    """判断した日の計画（株数に相当する比率）を、約定日の比率に直す。紙上の口座と同じ扱い:
+    - 残す銘柄は約定日の比率のまま触らない
+    - 買う銘柄は、判断した日の株価で決めた株数を約定日の株価で評価した比率（現金が足りなければ縮める）"""
+    new = {t: weights[t] for t in plan["kept"] if t in weights}
+    rest = {}
+    for t, w in plan["rest"].items():
+        p0, p1 = plan["px"].get(t), float(filled.at[d, t])
+        if p0 and p0 > 0 and not np.isnan(p1):
+            rest[t] = w * (p1 / p0) * (plan["eq"] / eq)
+        else:
+            rest[t] = w
+    room = max(0.0, 1.0 - sum(new.values()))
+    total = sum(rest.values())
+    if total > room + 1e-12 and total > 0:
+        rest = {t: w * room / total for t, w in rest.items()}
+    new.update(rest)
+    return new
+
+
 def run_backtest(
     prices: pd.DataFrame,
     bench: pd.Series | None,
@@ -160,8 +180,7 @@ def run_backtest(
                 if t in weights:
                     sell(t, d, why)
             elif kind == "target":
-                # 銘柄は判断した日に決め、比率は約定する日の保有比率から決める（バンド内の銘柄は触らない）
-                execute_target(target_weights(weights, payload, cfg.rebalance_band), d, "rebalance")
+                execute_target(_planned_to_weights(payload, weights, filled, d, eq), d, "rebalance")
 
         # 3) 今日の終値で判断する → 注文（lag 日後に約定）
         todays: list[tuple[int, str, object]] = []
@@ -183,10 +202,17 @@ def run_backtest(
                 halted = False  # 実運用では人が理由を見て再開する。検証では次の月初に再開したとみなす
                 peak = eq
             sel = select_at(feats, prices, d, cfg, sectors)
-            new = [p.ticker for p in sel.picks] if sel.invested else []
+            targets = [p.ticker for p in sel.picks] if sel.invested else []
             # 退出の予定と入れ替えが同じ日なら、入れ替えの目標が優先（退出銘柄は目標に入らない）
-            todays = [p for p in todays if p[1] != "exit" or p[2][0] not in new]
-            todays.append((i + execution_lag, "target", new))
+            todays = [p for p in todays if p[1] != "exit" or p[2][0] not in targets]
+            # 比率は判断した日の保有比率から決める（紙上の口座が判断した日の株価で株数を決めるのと同じ）
+            exiting = {p[2][0] for p in pending + todays if p[1] == "exit"}
+            current = {t: w for t, w in weights.items() if t not in exiting}
+            planned = target_weights(current, targets, cfg.rebalance_band)
+            kept = [t for t in targets if t in current and planned.get(t) == current[t]]
+            rest = {t: w for t, w in planned.items() if t not in kept}
+            plan = {"kept": kept, "rest": rest, "eq": eq, "px": {t: float(filled.at[d, t]) for t in rest}}
+            todays.append((i + execution_lag, "target", plan))
 
         if execution_lag == 0:
             for _, kind, payload in todays:
@@ -195,7 +221,7 @@ def run_backtest(
                     if t in weights:
                         sell(t, d, why)
                 else:
-                    execute_target(target_weights(weights, payload, cfg.rebalance_band), d, "rebalance")
+                    execute_target(_planned_to_weights(payload, weights, filled, d, eq), d, "rebalance")
         else:
             pending.extend(todays)
         equity.at[d] = eq
@@ -250,17 +276,16 @@ def exit_quality(trades: pd.DataFrame, prices: pd.DataFrame, horizon: int = 21) 
 def sweep_variants(base: StrategyConfig) -> list[tuple[str, StrategyConfig]]:
     """過学習の確認用: 基準から1つずつ値を変えた設定。結果が値で大きく変わるなら疑う。"""
     v: list[tuple[str, StrategyConfig]] = [("基準", base)]
-    v += [(f"上位{n}", replace(base, top_n=n)) for n in (3, 8, 10) if n != base.top_n]
-    v += [("上位8・業種3まで", replace(base, top_n=8, max_per_sector=3))]
+    v += [(f"上位{n}", replace(base, top_n=n)) for n in (5, 10, 12) if n != base.top_n]
     v += [("6-1モメンタム", replace(base, mom_lookback=126))]
     v += [(f"トレンド{w}日", replace(base, trend_window=w, regime_window=w)) for w in (150, 250)]
-    v += [("地合いなし", replace(base, use_regime=False))]
     v += [("業種の上限なし", replace(base, max_per_sector=0))]
-    v += [("退出ルールなし", replace(base, exit_below_trend=False, stop_loss=0.0))]
-    v += [("遮断器なし", replace(base, portfolio_dd_stop=0.0))]
     v += [("毎回均等に戻す", replace(base, rebalance_band=0.0))]
-    v += [("モメンタムだけ（上位8・地合いなし・退出なし・遮断器なし）",
-           replace(base, top_n=8, use_regime=False, exit_below_trend=False, stop_loss=0.0, portfolio_dd_stop=0.0))]
+    v += [("地合いの判定をつける", replace(base, use_regime=True))]
+    v += [("退出ルールをつける（200日線割れ・−20%）", replace(base, exit_below_trend=True, stop_loss=0.20))]
+    v += [("遮断器をつける（−20%）", replace(base, portfolio_dd_stop=0.20))]
+    v += [("守りを全部つける（上位5・旧ルール）",
+           replace(base, top_n=5, use_regime=True, exit_below_trend=True, stop_loss=0.20, portfolio_dd_stop=0.20))]
     return v
 
 

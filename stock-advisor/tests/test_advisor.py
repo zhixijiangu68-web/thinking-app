@@ -31,7 +31,7 @@ def test_universe_loads_default():
 
 
 def test_select_picks_top_n_and_only_eligible(prices, bench):
-    cfg = StrategyConfig(top_n=3)
+    cfg = StrategyConfig(top_n=3, use_regime=True)
     feats = compute_features(prices, bench, cfg)
     sel = select_at(feats, prices, prices.index[-1], cfg)
     assert len(sel.picks) <= 3
@@ -56,7 +56,7 @@ def test_no_lookahead(prices, bench):
 
 
 def test_regime_off_means_cash(prices):
-    cfg = StrategyConfig(top_n=3)
+    cfg = StrategyConfig(top_n=3, use_regime=True)
     falling = pd.Series(np.linspace(100, 10, len(prices)), index=prices.index)  # ずっと下げ相場
     sel = select_at(compute_features(prices, falling, cfg), prices, prices.index[-1], cfg)
     assert not sel.invested and sel.picks == []
@@ -135,7 +135,7 @@ def test_universe_has_sectors():
 
 
 def test_sector_cap(prices, bench):
-    cfg = StrategyConfig(top_n=5, max_per_sector=2)
+    cfg = StrategyConfig(top_n=5, max_per_sector=2, use_regime=True)
     feats = compute_features(prices, bench, cfg)
     sectors = {t: ("A" if i < 8 else "B") for i, t in enumerate(TICKERS)}
     sel = select_at(feats, prices, prices.index[-1], cfg, sectors)
@@ -146,7 +146,7 @@ def test_sector_cap(prices, bench):
 
 
 def test_exit_signals_trend_and_stop(prices, bench):
-    cfg = StrategyConfig(stop_loss=0.20)
+    cfg = StrategyConfig(stop_loss=0.20, exit_below_trend=True)
     feats = compute_features(prices, bench, cfg)
     d = prices.index[-1]
     t_ok = next(t for t in TICKERS if bool(feats.trend_ok.at[d, t]))
@@ -182,7 +182,7 @@ def test_backtest_circuit_breaker_fires_on_crash():
 
 
 def test_backtest_stop_loss_counts(prices, bench):
-    cfg = StrategyConfig(top_n=3, stop_loss=0.05)   # きつい保険なら、何回かは動く
+    cfg = StrategyConfig(top_n=3, stop_loss=0.05, exit_below_trend=True)   # きつい保険なら、何回かは動く
     res = run_backtest(prices, bench, cfg, cost=0.001)
     assert res.metrics["exit_stop"] + res.metrics["exit_trend"] > 0
     assert set(res.trades["why"]) <= {"rebalance", "trend", "stop", "dd_stop"}
@@ -344,8 +344,8 @@ def test_paper_matches_backtest_without_breaker():
 
 
 def test_paper_matches_backtest_with_breaker():
-    """遮断器ありでも、しきい値ぎりぎりの1日差を除けば一致する。"""
-    px, b, cfg, feats = _pair()
+    """守りの層を全部つけても、しきい値ぎりぎりの1日差を除けば一致する。"""
+    px, b, cfg, feats = _pair(use_regime=True, exit_below_trend=True, stop_loss=0.20, portfolio_dd_stop=0.20)
     bt = run_backtest(px, b, cfg, cost=0.0, execution_lag=1)
     sim, pf = simulate_paper(px, feats, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
     ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
@@ -360,7 +360,8 @@ def test_breaker_on_rebalance_day_does_not_reenter_same_day():
     px = pd.DataFrame({t: up * (1 + 0.01 * i) for i, t in enumerate(T)}, index=idx)
     crash = [d for d in idx if d.month == 5 and d.year == 2019][0]   # 5月の最初の営業日 = 入れ替え日
     px.loc[idx >= crash] *= 0.7
-    cfg = StrategyConfig(top_n=3, exit_below_trend=False, stop_loss=0.0, use_regime=False, max_per_sector=0)
+    cfg = StrategyConfig(top_n=3, exit_below_trend=False, stop_loss=0.0, use_regime=False, max_per_sector=0,
+                         portfolio_dd_stop=0.20)
     bt = run_backtest(px, None, cfg, cost=0.0, execution_lag=0)
     t = bt.trades
     assert (t[t.date == crash].why == "dd_stop").all() and (t.date == crash).sum() == 3

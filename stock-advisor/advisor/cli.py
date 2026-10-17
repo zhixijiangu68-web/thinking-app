@@ -34,7 +34,7 @@ REPORT_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 
 def _cfg(args) -> StrategyConfig:
-    return StrategyConfig(top_n=args.top, use_regime=not args.no_regime)
+    return StrategyConfig(top_n=args.top, use_regime=args.regime)
 
 
 def _load(args, start: str, extra: list[str] | None = None):
@@ -44,7 +44,7 @@ def _load(args, start: str, extra: list[str] | None = None):
     tickers = list(info) + [t for t in (extra or []) if t not in info]   # 保有している銘柄がリストから外れても株価は取る
     prices = load_prices(tickers, start=start, synthetic=args.synthetic, refresh=args.refresh, seed=args.seed)
     bench = None
-    if not args.no_regime:
+    if True:  # 比較のため日経平均はいつも取る（地合いの判定に使うのは --regime のときだけ）
         b = load_prices([DEFAULT_BENCHMARK], start=start, synthetic=args.synthetic, refresh=args.refresh, seed=args.seed + 1)
         bench = b[DEFAULT_BENCHMARK] if DEFAULT_BENCHMARK in b else None
         if bench is None:
@@ -76,6 +76,17 @@ def _rule_line(cfg: StrategyConfig, regime: bool) -> str:
     return s
 
 
+def _guard_line(cfg: StrategyConfig) -> str:
+    parts = []
+    if cfg.exit_below_trend:
+        parts.append("200日線割れで退出")
+    if cfg.stop_loss:
+        parts.append(f"取得値 −{cfg.stop_loss:.0%} で退出")
+    if cfg.portfolio_dd_stop:
+        parts.append(f"遮断器: 最高値から −{cfg.portfolio_dd_stop:.0%}")
+    return "、".join(parts) if parts else "守りの層なし（順張りだけ）"
+
+
 # ---------- screen ----------
 def cmd_screen(args) -> int:
     cfg = _cfg(args)
@@ -85,7 +96,7 @@ def cmd_screen(args) -> int:
     sel = select_at(feats, prices, asof, cfg, sectors)
 
     lines = [f"# 買う候補（{sel.asof.date()} 時点）", ""]
-    lines.append(f"- ルール: {_rule_line(cfg, cfg.use_regime and bench is not None)}")
+    lines.append(f"- ルール: {_rule_line(cfg, cfg.use_regime and bench is not None)}（{_guard_line(cfg)}）")
     lines.append(f"- 候補の母数: {len(prices.columns)} 銘柄、条件を満たしたのは {sel.eligible} 銘柄")
     if sel.sector_skipped:
         lines.append("- 業種の上限で外した: " + ", ".join(f"{t} {names.get(t, '')}" for t in sel.sector_skipped))
@@ -125,7 +136,7 @@ def cmd_backtest(args) -> int:
     print(f"# バックテスト {res.equity.index[0].date()} 〜 {res.equity.index[-1].date()}（{m['years']:.1f}年）")
     print(f"- 銘柄数 {len(prices.columns)}、{_rule_line(cfg, cfg.use_regime and bench is not None)}")
     print(f"- {'月' if args.freq == 'M' else '週'}1回入れ替え、片道コスト {args.cost:.2%}、約定は判断の {args.lag} 営業日後の終値、"
-          f"退出: 200日線割れ / 取得値 −{cfg.stop_loss:.0%}、遮断器: 最高値から −{cfg.portfolio_dd_stop:.0%}")
+          f"{_guard_line(cfg)}")
     print()
     print("| | ルール | 日経平均(買い持ち・配当なし) | 候補67銘柄を均等に買い持ち |".replace("67", str(len(prices.columns))))
     print("|---|---:|---:|---:|")
@@ -136,7 +147,7 @@ def cmd_backtest(args) -> int:
     print("\n※ 日経平均は株価指数（配当を含まない）。ルールと「均等に買い持ち」は配当込みの調整後終値。"
           "候補は今の大型株なので、生き残った銘柄だけを見ている（生存バイアス）。")
     print(f"\n入れ替え {int(m['rebalances'])} 回、売買 {int(m['trades'])} 件、株を持っていた日の割合 {m['time_in_market']:.0%}")
-    print(f"退出: 200日線割れ {int(m['exit_trend'])} 回 / −{cfg.stop_loss:.0%} {int(m['exit_stop'])} 回 / "
+    print(f"退出: 200日線割れ {int(m['exit_trend'])} 回 / 取得値 −{cfg.stop_loss:.0%} {int(m['exit_stop'])} 回 / "
           f"株価なし {int(m['exit_missing'])} 回、遮断器 {int(m['dd_stops'])} 回")
     if m.get("exits_judged"):
         print(f"退出して正解だった割合（売った後21営業日で下がった）: {m['exit_correct_rate']:.0%}"
@@ -331,8 +342,8 @@ def _cmd_paper(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="advisor", description="株の自動売買ツール（判断と紙上の売買）")
     p.add_argument("--universe", help="銘柄リストのファイル（既定: universe/jp-large.txt）")
-    p.add_argument("--top", type=int, default=5, help="持つ銘柄数（既定 5）")
-    p.add_argument("--no-regime", action="store_true", help="日経平均による地合いの判定を使わない")
+    p.add_argument("--top", type=int, default=8, help="持つ銘柄数（既定 8）")
+    p.add_argument("--regime", action="store_true", help="日経平均が200日線の下なら全部現金にする（既定では使わない）")
     p.add_argument("--synthetic", action="store_true", help="乱数の株価で動かす（動作確認用）")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--refresh", action="store_true", help="キャッシュを使わず取り直す")
