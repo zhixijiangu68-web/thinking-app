@@ -91,8 +91,8 @@ def run_backtest(
 ) -> BacktestResult:
     prices = prices.sort_index()
     feats = compute_features(prices, bench, cfg)
-    rets = prices.pct_change()
     filled = prices.ffill()  # 株価がとれない日は最後の値で評価する
+    rets = filled.pct_change()  # pandas 3 の pct_change は欠損を埋めないので、埋めた株価から計算する
 
     idx = prices.index
     first_ok = idx[min(cfg.min_history, len(idx) - 1)]
@@ -109,7 +109,7 @@ def run_backtest(
     halted = False
     equity = pd.Series(np.nan, index=days)
     trades: list[dict] = []
-    counts = {"trend": 0, "stop": 0, "missing": 0, "dd_stop": 0}
+    counts = {"trend": 0, "stop": 0, "missing": 0, "dd_stop": 0}   # 約定した退出の回数（銘柄ごと）
     days_in_market = 0
     # 約定待ち: (実行日, 種類, 中身)
     pending: list[tuple[int, str, object]] = []
@@ -118,6 +118,8 @@ def run_backtest(
         nonlocal eq
         eq *= 1 - cost * weights[t]
         trades.append({"date": d, "ticker": t, "from": weights[t], "to": 0.0, "why": why})
+        if why in counts:
+            counts[why] += 1
         del weights[t]
         entry.pop(t, None)
 
@@ -131,6 +133,10 @@ def run_backtest(
                 trades.append({"date": d, "ticker": t, "from": weights.get(t, 0.0), "to": new.get(t, 0.0), "why": why})
             if t in new and t not in weights:
                 entry[t] = float(filled.at[d, t])
+            elif t in new and new[t] > weights[t] + 1e-9:
+                # 買い増し: 取得値は比率で加重した平均（紙上の口座の平均取得単価に近づける）
+                p_now = float(filled.at[d, t])
+                entry[t] = (weights[t] * entry.get(t, p_now) + (new[t] - weights[t]) * p_now) / new[t]
         for t in list(entry):
             if t not in new:
                 del entry[t]
@@ -164,13 +170,11 @@ def run_backtest(
             for sig in exit_signals(feats, prices, d, cfg, {t: entry.get(t, 0.0) for t in weights}):
                 if sig.ticker not in already:
                     todays.append((i + execution_lag, "exit", (sig.ticker, sig.reason)))
-                    counts[sig.reason] += 1
 
         peak = max(peak, eq)
         fired_today = False
         if cfg.portfolio_dd_stop and weights and eq / peak - 1 <= -cfg.portfolio_dd_stop and not halted:
             todays = [(i + execution_lag, "exit", (t, "dd_stop")) for t in weights]
-            counts["dd_stop"] += 1
             halted = True
             fired_today = True
 
@@ -212,7 +216,8 @@ def run_backtest(
     m.update({
         "rebalances": float(len(rb)), "trades": float(len(trades)),
         "exit_trend": float(counts["trend"]), "exit_stop": float(counts["stop"]),
-        "exit_missing": float(counts["missing"]), "dd_stops": float(counts["dd_stop"]),
+        "exit_missing": float(counts["missing"]),
+        "dd_stops": float(len({r["date"] for r in trades if r["why"] == "dd_stop"})),
         "time_in_market": days_in_market / len(days),
     })
     m.update(exit_quality(trades_df, filled))

@@ -37,11 +37,12 @@ def _cfg(args) -> StrategyConfig:
     return StrategyConfig(top_n=args.top, use_regime=not args.no_regime)
 
 
-def _load(args, start: str):
+def _load(args, start: str, extra: list[str] | None = None):
     info = load_universe_info(args.universe)
     names = {t: n for t, (n, _) in info.items()}
     sectors = {t: s for t, (_, s) in info.items()}
-    prices = load_prices(list(info), start=start, synthetic=args.synthetic, refresh=args.refresh, seed=args.seed)
+    tickers = list(info) + [t for t in (extra or []) if t not in info]   # 保有している銘柄がリストから外れても株価は取る
+    prices = load_prices(tickers, start=start, synthetic=args.synthetic, refresh=args.refresh, seed=args.seed)
     bench = None
     if not args.no_regime:
         b = load_prices([DEFAULT_BENCHMARK], start=start, synthetic=args.synthetic, refresh=args.refresh, seed=args.seed + 1)
@@ -247,7 +248,7 @@ def cmd_paper(args) -> int:
             code = _cmd_paper(args)
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         asof = getattr(args, "_asof", None) or date.today()
-        out = REPORT_DIR / f"{asof}.md"
+        out = REPORT_DIR / f"{asof}-paper.md"
         with out.open("a", encoding="utf-8") as f:
             f.write("\n" + tee.buf.getvalue())
         print(f"追記: {out}", file=sys.stderr)
@@ -285,7 +286,7 @@ def _cmd_paper(args) -> int:
         return 0
 
     cfg = _cfg(args)
-    names, sectors, prices, bench = _load(args, start=_recent_start())
+    names, sectors, prices, bench = _load(args, start=_recent_start(), extra=list(pf.positions) + [p["ticker"] for p in pf.pending])
     asof = prices.index[-1]
     args._asof = asof.date()
     last = last_prices(prices, asof)

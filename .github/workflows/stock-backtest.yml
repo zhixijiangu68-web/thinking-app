@@ -50,4 +50,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add reports/
           git diff --cached --quiet || git commit -m "stock-advisor: 実データのバックテスト $(date -u +%Y-%m-%d)"
+          git pull --rebase origin "${GITHUB_REF_NAME}"   # 走っている間に別の push があっても止まらない
           git push

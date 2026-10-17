@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -69,9 +70,11 @@ def daily_step(
     when = str(asof.date())
     last = last_prices(prices, asof)
     rep = StepReport(asof=asof)
+    if dry_run:
+        pf = copy.deepcopy(pf)   # 本番と同じ手順を複製の口座で回す（保存しないので何も変わらない）
 
     # 1) 約定待ち
-    if pf.pending and not dry_run:
+    if pf.pending:
         rep.filled = fill_pending(pf, last, when, lot=lot)
         if pf.pending:
             rep.notes.append("まだ待ち: " + ", ".join(p["ticker"] for p in pf.pending) + "（株価がとれない、または判断した日と同じ日）")
@@ -92,8 +95,10 @@ def daily_step(
     # 3) 遮断器
     peak = max(pf.peak_equity, rep.equity)
     rep.drawdown = rep.equity / peak - 1 if peak > 0 else 0.0
-    if not dry_run:
-        pf.peak_equity = peak
+    pf.peak_equity = peak
+    for t in pf.positions:
+        if t not in last:
+            rep.notes.append(f"{t}: 株価がとれない。取得値で評価している。手で確かめる")
     if cfg.portfolio_dd_stop and pf.positions and rep.drawdown <= -cfg.portfolio_dd_stop:
         rep.breaker = True
         done = {o.ticker for o in rep.exits}
@@ -112,7 +117,7 @@ def daily_step(
         rep.dropped_exits = [o.ticker for o in rep.exits if o.ticker in rep.targets]
         rep.exits = [o for o in rep.exits if o.ticker not in rep.targets]
         old_pending = [p for p in pf.pending if p["side"] == "sell" and p["ticker"] in rep.targets and p["reason"].startswith("退出")]
-        if old_pending and not dry_run:
+        if old_pending:
             pf.pending = [p for p in pf.pending if p not in old_pending]
             rep.dropped_exits += [p["ticker"] for p in old_pending]
         # 退出の売りで戻る現金を、入れ替えの計算に入れる
@@ -123,9 +128,7 @@ def daily_step(
                                                         names=names, band=cfg.rebalance_band)
         rep.rebalanced = True
 
-    # 5) 注文を出す
-    if dry_run:
-        return rep
+    # 5) 注文を出す（dry_run のときは複製の口座に）
     orders = rep.orders
     if orders:
         if fill_now:

@@ -52,16 +52,18 @@ def _read_meta(path: Path) -> dict:
         return {}
 
 
-def _previous_business_day(today: date | None = None) -> pd.Timestamp:
+def _latest_business_day(today: date | None = None) -> pd.Timestamp:
+    """今日が営業日なら今日、そうでなければ直前の営業日。"""
     t = pd.Timestamp(today or date.today())
-    return pd.bdate_range(end=t - pd.Timedelta(days=1), periods=1)[0]
+    return pd.bdate_range(end=t, periods=1)[0]
 
 
 def _is_fresh(series: pd.Series, today: date | None = None) -> bool:
-    """前の営業日の終値まで入っていれば新しいとみなす（週末や祝日に取り直さない）。"""
+    """最新の営業日の終値まで入っていれば新しいとみなす。
+    引け後に回すと毎日1回は取り直すが、土日は取り直さない。引け前に回すと取り直しても前日までしか入らない（それでよい）。"""
     if series.empty:
         return False
-    return series.index.max() >= _previous_business_day(today)
+    return series.index.max() >= _latest_business_day(today)
 
 
 def _download_once(tickers: list[str], start: str) -> dict[str, pd.Series]:

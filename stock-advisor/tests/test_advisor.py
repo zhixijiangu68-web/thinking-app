@@ -286,10 +286,11 @@ def test_sanity_report_flags_jump_stale_short(prices):
 def test_cache_freshness_uses_business_days():
     import datetime as dt
     s = pd.Series([1.0], index=pd.DatetimeIndex(["2026-10-16"]))   # 金曜の終値
+    assert _is_fresh(s, today=dt.date(2026, 10, 16))   # 金曜の引け後
     assert _is_fresh(s, today=dt.date(2026, 10, 17))   # 土曜
     assert _is_fresh(s, today=dt.date(2026, 10, 18))   # 日曜
-    assert _is_fresh(s, today=dt.date(2026, 10, 19))   # 月曜の朝（前営業日は金曜）
-    assert not _is_fresh(s, today=dt.date(2026, 10, 20))  # 火曜（月曜の終値がない）
+    assert not _is_fresh(s, today=dt.date(2026, 10, 19))   # 月曜（月曜の終値がまだない → 取り直す。毎日1回は取り直す）
+    assert not _is_fresh(s, today=dt.date(2026, 10, 20))
 
 
 def test_plan_orders_invariants_random():
@@ -465,9 +466,13 @@ def test_band_reduces_trades_and_keeps_engines_consistent():
 def test_plan_orders_band_keeps_positions_within_band():
     pf = Portfolio(cash=0, positions={"A": 100, "B": 100}, avg_cost={"A": 1000.0, "B": 1000.0})
     px = {"A": 1100.0, "B": 900.0, "C": 500.0}
-    # 合計 200,000、目標 1/3 ≈ 66,667。A=110,000, B=90,000 はどちらも ±25% の外 → 売って C を買う
-    orders, _ = plan_orders(pf, ["A", "B", "C"], px, lot=100, band=0.25)
-    assert {o.ticker for o in orders} >= {"C"}
+    # 合計 200,000、目標 1/3 ≈ 66,667。A=110,000, B=90,000 は ±25% の外だが、1単元が目標額より高いので
+    # 売って減らすことはできない（0 か 100 株）→ そのまま持つ。C は資金が残らず買えない
+    orders, skipped = plan_orders(pf, ["A", "B", "C"], px, lot=100, band=0.25)
+    assert orders == [] and skipped == ["C"]
+    # 単元が 1 株なら、A と B を減らして C を買う
+    orders1, _ = plan_orders(pf, ["A", "B", "C"], px, lot=1, band=0.25)
+    assert {o.ticker for o in orders1} == {"A", "B", "C"} and all(o.side == "buy" for o in orders1 if o.ticker == "C")
     pf2 = Portfolio(cash=0, positions={"A": 100, "B": 100, "C": 100}, avg_cost={})
     px2 = {"A": 1000.0, "B": 1100.0, "C": 950.0}     # どれも目標 ±25% 以内
     orders2, _ = plan_orders(pf2, ["A", "B", "C"], px2, lot=100, band=0.25)

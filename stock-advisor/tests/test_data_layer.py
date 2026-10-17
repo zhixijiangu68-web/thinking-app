@@ -97,7 +97,7 @@ def test_load_prices_caches_and_reuses(monkeypatch, tmp_path):
     monkeypatch.setattr(D, "_download_once", fake)
     # 「今日」をデータの最終日の翌日にする（キャッシュが新しいと判定されるように）
     last = pd.bdate_range("2024-01-01", periods=400)[-1].date()
-    monkeypatch.setattr(D, "_previous_business_day", lambda today=None: pd.Timestamp(last))
+    monkeypatch.setattr(D, "_latest_business_day", lambda today=None: pd.Timestamp(last))
 
     df = D.load_prices(["A.T", "B.T"], start="2024-01-01", cache_dir=tmp_path)
     assert list(df.columns) == ["A.T", "B.T"] and len(df) == 400
@@ -117,10 +117,10 @@ def test_load_prices_caches_and_reuses(monkeypatch, tmp_path):
 def test_load_prices_falls_back_to_stale_cache(monkeypatch, tmp_path):
     good = lambda tickers, start: _series_dict(tickers, start="2024-01-01", days=400)
     monkeypatch.setattr(D, "_download_once", good)
-    monkeypatch.setattr(D, "_previous_business_day", lambda today=None: pd.Timestamp("2024-06-01"))
+    monkeypatch.setattr(D, "_latest_business_day", lambda today=None: pd.Timestamp("2024-06-01"))
     D.load_prices(["A.T"], start="2024-01-01", cache_dir=tmp_path)
     # 日が進んでキャッシュが古くなり、取り直しも失敗する
-    monkeypatch.setattr(D, "_previous_business_day", lambda today=None: pd.Timestamp("2026-01-05"))
+    monkeypatch.setattr(D, "_latest_business_day", lambda today=None: pd.Timestamp("2026-01-05"))
     monkeypatch.setattr(D, "_download_once", lambda tickers, start: (_ for _ in ()).throw(ConnectionError("x")))
     monkeypatch.setattr(D.time, "sleep", lambda s: None)
     df = D.load_prices(["A.T"], start="2024-01-01", cache_dir=tmp_path)

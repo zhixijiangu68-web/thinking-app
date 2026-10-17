@@ -156,15 +156,21 @@ def plan_orders(
     targets = [t for t in targets if t not in kept]
     if not targets:
         return orders, []
-    # 3) 1単元も買えない銘柄を外しながら、均等額を決める
+    # 3) 1単元も買えない銘柄を外しながら、均等額を決める。すでに持っている銘柄なら、売らずにそのまま持つ
     active = list(targets)
+    skipped: list[str] = []
     while active:
         per = investable / len(active)
-        too_expensive = [t for t in active if prices[t] * lot > per and pf.positions.get(t, 0) == 0]
+        too_expensive = [t for t in active if prices[t] * lot > per]
         if not too_expensive:
             break
+        for t in too_expensive:
+            if pf.positions.get(t, 0) > 0:
+                kept.append(t)
+                investable = max(0.0, investable - pf.positions[t] * prices[t])
+            else:
+                skipped.append(t)
         active = [t for t in active if t not in too_expensive]
-    skipped = [t for t in targets if t not in active]
     if not active:
         return orders, skipped
     per = investable / len(active)

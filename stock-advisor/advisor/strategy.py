@@ -69,7 +69,9 @@ class Selection:
 
 
 def compute_features(prices: pd.DataFrame, bench: pd.Series | None, cfg: StrategyConfig) -> Features:
-    px = prices.sort_index()
+    raw = prices.sort_index()
+    # 短い欠損（数日の取得失敗）は前の値で埋めて計算する。埋めないと rolling が 200 日間 NaN になり、退出扱いになる
+    px = raw.ffill(limit=max(cfg.max_missing_days, 1))
     mom = px.shift(cfg.mom_skip) / px.shift(cfg.mom_lookback + cfg.mom_skip) - 1.0
     sma = px.rolling(cfg.trend_window, min_periods=cfg.trend_window).mean()
     trend_ok = (px > sma) & sma.notna()
@@ -159,6 +161,8 @@ def exit_signals(
     pos = prices.index.get_loc(asof)
     for t, entry in positions.items():
         if t not in prices.columns:
+            # 株価の表にない（銘柄リストから外れた、取得できない）。取得値のまま退出扱いにして人に知らせる
+            out.append(ExitSignal(t, "missing", float(entry or 0.0), 0.0))
             continue
         px = prices.at[asof, t]
         if pd.isna(px):
