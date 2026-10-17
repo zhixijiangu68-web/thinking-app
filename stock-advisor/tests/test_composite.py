@@ -98,8 +98,8 @@ def test_plan_orders_proportional_targets():
 
 def test_fast_backtest_matches_full(data):
     px, b = data
-    for cfg in (StrategyConfig(scoring="m12", weighting="equal", rebalance_band=0.0, top_n=5),
-                StrategyConfig(scoring="composite", weighting="invvol", rebalance_band=0.0, top_n=5)):
+    for cfg in (StrategyConfig(scoring="m12", weighting="equal", rebalance_band=0.0, top_n=5, sleeves=1),
+                StrategyConfig(scoring="composite", weighting="invvol", rebalance_band=0.0, top_n=5, sleeves=1)):
         fb = fast_backtest(px, b, cfg, cost=0.001)
         bt = run_backtest(px, b, cfg, cost=0.001)
         a = fb["equity"]; c = bt.equity.reindex(a.index)
@@ -109,7 +109,7 @@ def test_fast_backtest_matches_full(data):
 
 def test_paper_matches_backtest_composite_invvol(data):
     px, b = data
-    cfg = StrategyConfig(scoring="composite", weighting="invvol", top_n=5)
+    cfg = StrategyConfig(scoring="composite", weighting="invvol", top_n=5, sleeves=1)
     feats = compute_features(px, b, cfg)
     bt = run_backtest(px, b, cfg, cost=0.0)
     sim, _ = simulate_paper(px, feats, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
@@ -146,8 +146,8 @@ from advisor.fast import tranche_backtest
 
 def test_vol_target_scales_exposure(data):
     px, b = data
-    cfg0 = StrategyConfig(top_n=5, rebalance_band=0.0)
-    cfg1 = StrategyConfig(top_n=5, rebalance_band=0.0, vol_target=0.05)   # きつい目標 → 必ず 1 未満
+    cfg0 = StrategyConfig(top_n=5, rebalance_band=0.0, sleeves=1)
+    cfg1 = StrategyConfig(top_n=5, rebalance_band=0.0, vol_target=0.05, sleeves=1)   # きつい目標 → 必ず 1 未満
     f = compute_features(px, b, cfg0)
     s0 = select_at(f, px, px.index[-1], cfg0)
     s1 = select_at(f, px, px.index[-1], cfg1)
@@ -163,13 +163,13 @@ def test_vol_target_scales_exposure(data):
 
 def test_vol_target_reduces_vol_in_backtest_and_engines_agree(data):
     px, b = data
-    cfg = StrategyConfig(top_n=5, vol_target=0.12)
+    cfg = StrategyConfig(top_n=5, vol_target=0.12, sleeves=1)
     f = compute_features(px, b, cfg)
-    base = fast_backtest(px, b, StrategyConfig(top_n=5, rebalance_band=0.0), cost=0.0)
+    base = fast_backtest(px, b, StrategyConfig(top_n=5, rebalance_band=0.0, sleeves=1), cost=0.0)
     vt = fast_backtest(px, b, replace_cfg(cfg, rebalance_band=0.0), cost=0.0, feats=f)
     assert vt["metrics"]["annual_vol"] < base["metrics"]["annual_vol"]
     bt = run_backtest(px, b, cfg, cost=0.0)
-    bt0 = run_backtest(px, b, StrategyConfig(top_n=5), cost=0.0)
+    bt0 = run_backtest(px, b, StrategyConfig(top_n=5, sleeves=1), cost=0.0)
     assert bt.metrics["annual_vol"] < bt0.metrics["annual_vol"]          # 通常版でも変動率が下がる
     sim, pf = simulate_paper(px, f, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
     ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
@@ -213,7 +213,7 @@ def test_sleeves_backtest_matches_engine(data):
     cfg = StrategyConfig(top_n=5, sleeves=4)
     f = compute_features(px, b, cfg)
     bt = run_backtest(px, b, cfg, cost=0.0)
-    assert bt.metrics["rebalances"] > run_backtest(px, b, StrategyConfig(top_n=5), cost=0.0).metrics["rebalances"] * 3
+    assert bt.metrics["rebalances"] > run_backtest(px, b, StrategyConfig(top_n=5, sleeves=1), cost=0.0).metrics["rebalances"] * 3
     sim, pf = simulate_paper(px, f, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
     ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
     # 4列は判断の回数が4倍で、バンドの境界ぎりぎりの判断の違いが積み重なる。論理は同じなので 5% まで許す

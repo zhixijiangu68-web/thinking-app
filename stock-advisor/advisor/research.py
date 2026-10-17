@@ -20,8 +20,8 @@ from .backtest import metrics_from_equity
 from .fast import equal_weight_equity, fast_backtest, tranche_backtest
 from .strategy import StrategyConfig, compute_features
 
-BASE_M12 = StrategyConfig(scoring="m12", weighting="equal", rebalance_band=0.0)
-BASE_COMP = StrategyConfig(scoring="composite", weighting="invvol", rebalance_band=0.0)
+BASE_M12 = StrategyConfig(scoring="m12", weighting="equal", rebalance_band=0.0, sleeves=1)   # 高速版は 1 列で回し、分割は H で別に検証
+BASE_COMP = StrategyConfig(scoring="composite", weighting="invvol", rebalance_band=0.0, sleeves=1)
 BASE_VT = replace(BASE_M12, vol_target=0.20)   # 案1: ボラ目標 20%（docs/risk-sizing-20261017.md）
 
 

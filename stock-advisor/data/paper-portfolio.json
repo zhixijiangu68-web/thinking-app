@@ -1,0 +1,15 @@
+{
+  "cash": 5000000.0,
+  "positions": {},
+  "avg_cost": {},
+  "history": [],
+  "created": "2026-10-17T23:57:04",
+  "peak_equity": 5000000.0,
+  "halted": false,
+  "halted_reason": "",
+  "halted_on": "",
+  "last_rebalance": "",
+  "pending": [],
+  "sleeves": {},
+  "sleeve_month": {}
+}

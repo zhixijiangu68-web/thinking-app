@@ -393,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scoring", choices=["m12", "composite"], default="m12", help="並べ方（m12 = 12-1モメンタムだけ、composite = 合成スコア）")
     p.add_argument("--weighting", choices=["equal", "invvol"], default="equal", help="比率（equal = 同額、invvol = 逆ボラティリティ）")
     p.add_argument("--vol-target", type=float, default=0.0, help="ボラティリティ目標（年率、例 0.20）。0 = 使わない")
-    p.add_argument("--sleeves", type=int, default=1, help="分割入れ替えの列の数（1 = 月初に全部、4 = 週をずらして4列）")
+    p.add_argument("--sleeves", type=int, default=4, help="分割入れ替えの列の数（4 = 週をずらして4列、既定。1 = 月初に全部）")
     p.add_argument("--synthetic", action="store_true", help="乱数の株価で動かす（動作確認用）")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--refresh", action="store_true", help="キャッシュを使わず取り直す")

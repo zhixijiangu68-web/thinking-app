@@ -43,7 +43,7 @@ class StrategyConfig:
     weighting: str = "equal"        # 比率: "equal"（同額）か "invvol"（逆ボラティリティ、上限 max_weight・下限 min_weight）
     max_weight: float = 0.20
     min_weight: float = 0.05
-    sleeves: int = 1                # 分割入れ替えの列の数（1 = 月初に全部。4 = 4列を第1〜4週に分けて入れ替える。docs/risk-sizing-20261017.md 案2）
+    sleeves: int = 4                # 分割入れ替えの列の数（4 = 4列を第1〜4週に分けて入れ替える。1 = 月初に全部）。2026-10-17 に 1 → 4（docs/risk-sizing-20261017.md 案2）
     vol_target: float = 0.0         # ボラティリティ目標（年率）。0 = 使わない。選んだ銘柄の直近 vol_window 日の共分散から
                                     # 全部持ったときの変動率を見積もり、目標を超えるぶんだけ株の比率を下げて現金にする
 

@@ -170,14 +170,14 @@ def test_backtest_circuit_breaker_fires_on_crash():
     crash_at = idx[-120]
     px.loc[idx >= crash_at] *= 0.6                      # 一日で −40%
     bench = pd.Series(np.linspace(100, 200, n), index=idx)  # 地合いは良いまま
-    cfg = StrategyConfig(top_n=3, exit_below_trend=False, stop_loss=0.0, portfolio_dd_stop=0.20, max_per_sector=0)
+    cfg = StrategyConfig(top_n=3, exit_below_trend=False, stop_loss=0.0, portfolio_dd_stop=0.20, max_per_sector=0, sleeves=1)
     res = run_backtest(px, bench, cfg, cost=0.0)
     assert res.metrics["dd_stops"] >= 1
     after = res.equity.loc[crash_at:]
     assert after.iloc[0] / res.equity.loc[:crash_at].max() - 1 <= -0.20   # 暴落の日に −20% を超えた
     assert after.iloc[1:].nunique() == 1                                   # 全部売ったので、その後は横ばい
     no_breaker = run_backtest(px, bench, StrategyConfig(top_n=3, exit_below_trend=False, stop_loss=0.0,
-                                                        portfolio_dd_stop=0.0, max_per_sector=0), cost=0.0)
+                                                        portfolio_dd_stop=0.0, max_per_sector=0, sleeves=1), cost=0.0)
     assert no_breaker.metrics["dd_stops"] == 0
 
 
@@ -327,6 +327,7 @@ from advisor.engine import daily_step, simulate_paper, last_prices
 
 
 def _pair(seed=3, n=20, **kw):
+    kw.setdefault("sleeves", 1)
     T = [f"{1000+i}.T" for i in range(n)]
     px = synthetic_prices(T, "2016-01-01", "2022-12-30", seed=seed)
     b = synthetic_prices(["^B"], "2016-01-01", "2022-12-30", seed=seed + 1)["^B"]
@@ -361,7 +362,7 @@ def test_breaker_on_rebalance_day_does_not_reenter_same_day():
     crash = [d for d in idx if d.month == 5 and d.year == 2019][0]   # 5月の最初の営業日 = 入れ替え日
     px.loc[idx >= crash] *= 0.7
     cfg = StrategyConfig(top_n=3, exit_below_trend=False, stop_loss=0.0, use_regime=False, max_per_sector=0,
-                         portfolio_dd_stop=0.20)
+                         portfolio_dd_stop=0.20, sleeves=1)
     bt = run_backtest(px, None, cfg, cost=0.0, execution_lag=0)
     t = bt.trades
     assert (t[t.date == crash].why == "dd_stop").all() and (t.date == crash).sum() == 3
@@ -454,7 +455,7 @@ def test_target_weights_band():
 
 def test_band_reduces_trades_and_keeps_engines_consistent():
     px, b, cfg0, _ = _pair(portfolio_dd_stop=0.0, rebalance_band=0.0)
-    cfg1 = StrategyConfig(top_n=5, portfolio_dd_stop=0.0, rebalance_band=0.25)
+    cfg1 = StrategyConfig(top_n=5, portfolio_dd_stop=0.0, rebalance_band=0.25, sleeves=1)
     bt0 = run_backtest(px, b, cfg0, cost=0.001)
     bt1 = run_backtest(px, b, cfg1, cost=0.001)
     assert bt1.metrics["trades"] < bt0.metrics["trades"]

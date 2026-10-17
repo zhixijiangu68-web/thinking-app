@@ -4,6 +4,8 @@ name: stock-screen
 on:
   schedule:
     - cron: "10 8 * * 1-5"   # 17:10 JST（東証は 15:30 に引け。Yahoo のデータ反映を待つ）
+  push:
+    paths: [".github/workflows/stock-screen.yml", "stock-advisor/data/paper-portfolio.json"]   # 口座を作った/直した日に1回動かす
   workflow_dispatch:
 
 permissions:
@@ -26,7 +28,7 @@ jobs:
       - run: python -m pytest -q tests
       - name: 今日の候補を出す
         run: python -m advisor screen --save
-      - name: 紙上の口座を回す（data/paper-portfolio.json がコミットされているときだけ）
+      - name: 紙上の口座を回す（data/paper-portfolio.json がコミットされているときだけ。4列の分割入れ替えなので毎日回す）
         run: |
           if [ -f data/paper-portfolio.json ]; then
             python -m advisor paper auto --save
