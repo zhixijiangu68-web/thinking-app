@@ -20,6 +20,9 @@
 | `python -m advisor paper auto` | `check` を毎日、月が変わっていれば `rebalance`（GitHub Actions 用） |
 | `python -m advisor paper status` | 紙上の口座の損益 |
 | `python -m advisor paper resume --why '…'` | 遮断器で止まった口座を、理由を記録して再開する |
+| `python -m advisor research --save` | 1000回の検証（ブートストラップ・重みのランダム化・日取り・開始日・前半後半・格子）。`reports/research-<日付>.md` |
+
+共通の選択: `--scoring composite`（6要素の合成スコア。設計と根拠は `docs/composite-20261017.md`）、`--weighting invvol`（逆ボラティリティ配分）。既定は `m12`・`equal`。
 
 紙上の注文は**判断した日の引け後に出し、翌営業日の終値で約定**する（実際の発注と同じ順番。`--fill-now` で当日約定）。株価が1日で ±30% 動いた・最近の株価がとれない銘柄は「データの確認が必要」として出す。
 
