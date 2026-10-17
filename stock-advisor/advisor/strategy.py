@@ -1,13 +1,14 @@
-"""「どの株を買うか」を決めるルール。
+"""「どの株を買うか」「いつ退くか」を決めるルール。設計の理由は docs/design.md。
 
-ルール（モメンタム + トレンド + 地合い）:
+買い（月1回の入れ替え日）:
 1. 地合い: ベンチマーク（日経平均）が 200日移動平均より上のときだけ株を持つ。下なら全部現金。
-2. 候補の条件: 株価が自分の 200日移動平均より上、かつ 60日の変動率（年率）が max_vol 以下。
-3. 並べ方: 12か月の値上がり率（直近1か月を除く＝「12-1 モメンタム」）が高い順。
-4. 上位 top_n 銘柄を同じ金額ずつ持つ。月に1回入れ替える。
+2. 候補の条件: 株価が自分の 200日移動平均より上、年率の変動率が max_vol 以下、12-1モメンタムがプラス。
+3. 並べ方: 12か月の値上がり率（直近1か月を除く）が高い順。同じ業種は max_per_sector まで。
+4. 上位 top_n 銘柄を同じ金額ずつ持つ。
 
-根拠: モメンタム（Jegadeesh & Titman 1993）と移動平均によるトレンド追随（Faber 2007）は、
-長期・多市場で確認されている数少ない規則性。ただし将来も効く保証はない。
+退出（毎日）:
+5. 保有銘柄が自分の 200日線を割ったら売る。取得値から stop_loss 下がっても売る。次の入れ替えまで現金。
+6. 口座の遮断器: 評価額が最高値から portfolio_dd_stop 下がったら全部売って止める（人が再開する）。
 """
 from __future__ import annotations
 
@@ -27,6 +28,10 @@ class StrategyConfig:
     max_vol: float = 0.60     # 年率60%を超える荒い銘柄は外す
     regime_window: int = 200
     use_regime: bool = True
+    max_per_sector: int = 2   # 同じ業種はここまで（0 = 制限なし）
+    exit_below_trend: bool = True   # 保有銘柄が200日線を割ったら売る
+    stop_loss: float = 0.20         # 取得値から −20% で売る（0 = 使わない）
+    portfolio_dd_stop: float = 0.20 # 評価額が最高値から −20% で全部売って止める（0 = 使わない）
 
     @property
     def min_history(self) -> int:
@@ -48,6 +53,7 @@ class Pick:
     momentum: float
     vol: float
     price: float
+    sector: str = ""
 
 
 @dataclass
@@ -57,6 +63,7 @@ class Selection:
     picks: list[Pick] = field(default_factory=list)
     eligible: int = 0
     reason: str = ""
+    sector_skipped: list[str] = field(default_factory=list)  # 業種の上限で外した銘柄
 
 
 def compute_features(prices: pd.DataFrame, bench: pd.Series | None, cfg: StrategyConfig) -> Features:
@@ -93,19 +100,66 @@ def rank_at(feats: Features, prices: pd.DataFrame, asof: pd.Timestamp, cfg: Stra
     return df.sort_values("score", ascending=False)
 
 
-def select_at(feats: Features, prices: pd.DataFrame, asof: pd.Timestamp, cfg: StrategyConfig) -> Selection:
+def _nearest_index(prices: pd.DataFrame, asof: pd.Timestamp) -> pd.Timestamp:
     asof = pd.Timestamp(asof)
-    if asof not in prices.index:
-        # 指定日が休場なら、その直前の営業日
-        asof = prices.index[prices.index.get_indexer([asof], method="pad")[0]]
+    if asof in prices.index:
+        return asof
+    return prices.index[prices.index.get_indexer([asof], method="pad")[0]]
+
+
+def select_at(
+    feats: Features, prices: pd.DataFrame, asof: pd.Timestamp, cfg: StrategyConfig,
+    sectors: dict[str, str] | None = None,
+) -> Selection:
+    asof = _nearest_index(prices, asof)
     regime_ok = bool(feats.regime_ok.loc[asof]) if asof in feats.regime_ok.index else True
     if not regime_ok:
         return Selection(asof=asof, invested=False, reason="地合いが弱い（ベンチマークが200日線の下）ので全部現金")
     table = rank_at(feats, prices, asof, cfg)
     elig = table[table["eligible"]]
-    picks = [
-        Pick(ticker=t, score=float(r.score), momentum=float(r.momentum), vol=float(r.vol), price=float(r.price))
-        for t, r in elig.head(cfg.top_n).iterrows()
-    ]
+    sectors = sectors or {}
+    count: dict[str, int] = {}
+    picks: list[Pick] = []
+    skipped: list[str] = []
+    for t, r in elig.iterrows():
+        if len(picks) >= cfg.top_n:
+            break
+        sec = sectors.get(t, "不明")
+        if cfg.max_per_sector and count.get(sec, 0) >= cfg.max_per_sector:
+            skipped.append(t)
+            continue
+        count[sec] = count.get(sec, 0) + 1
+        picks.append(Pick(ticker=t, score=float(r.score), momentum=float(r.momentum),
+                          vol=float(r.vol), price=float(r.price), sector=sec))
     reason = "" if picks else "条件を満たす銘柄がない（上昇トレンドかつ12-1モメンタムがプラスの銘柄なし）ので現金"
-    return Selection(asof=asof, invested=bool(picks), picks=picks, eligible=int(len(elig)), reason=reason)
+    return Selection(asof=asof, invested=bool(picks), picks=picks, eligible=int(len(elig)),
+                     reason=reason, sector_skipped=skipped)
+
+
+@dataclass
+class ExitSignal:
+    ticker: str
+    reason: str   # "trend" / "stop"
+    price: float
+    change: float  # 取得値からの変化
+
+
+def exit_signals(
+    feats: Features, prices: pd.DataFrame, asof: pd.Timestamp, cfg: StrategyConfig,
+    positions: dict[str, float],  # ticker -> 取得値（平均取得単価）
+) -> list[ExitSignal]:
+    """毎日の退出判定。positions のうち売るべき銘柄を返す。"""
+    asof = _nearest_index(prices, asof)
+    out: list[ExitSignal] = []
+    for t, entry in positions.items():
+        if t not in prices.columns:
+            continue
+        px = prices.at[asof, t]
+        if pd.isna(px):
+            continue
+        chg = float(px / entry - 1.0) if entry and entry > 0 else 0.0
+        if cfg.exit_below_trend and not bool(feats.trend_ok.at[asof, t]):
+            out.append(ExitSignal(t, "trend", float(px), chg))
+        elif cfg.stop_loss and chg <= -cfg.stop_loss:
+            out.append(ExitSignal(t, "stop", float(px), chg))
+    return out

@@ -26,10 +26,17 @@ jobs:
       - run: python -m pytest -q tests
       - name: 今日の候補を出す
         run: python -m advisor screen --save
-      - name: reports/ をコミット
+      - name: 紙上の口座を回す（data/paper-portfolio.json がコミットされているときだけ）
+        run: |
+          if [ -f data/paper-portfolio.json ]; then
+            python -m advisor paper auto | tee -a "reports/$(date -u +%Y-%m-%d).md"
+          else
+            echo "紙上の口座なし（paper init して data/paper-portfolio.json をコミットすると回る）"
+          fi
+      - name: reports/ と口座をコミット
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/
+          git add reports/ data/paper-portfolio.json 2>/dev/null || git add reports/
           git diff --cached --quiet || git commit -m "stock-advisor: $(date -u +%Y-%m-%d) の候補"
           git push

@@ -10,10 +10,15 @@
 | `python -m advisor screen` | 今日の「買う候補」を上位5銘柄まで出す（理由つき） |
 | `python -m advisor backtest --start 2015-01-01` | ルールを過去で検証（年率リターン・最大下落・シャープを日経平均と比べる） |
 | `python -m advisor paper init --cash 1000000` | 紙上の口座を作る |
+| `python -m advisor paper check` | 退出ルール（200日線割れ・取得値 −20%・口座の遮断器）を今日の終値で確かめ、紙上で売る |
 | `python -m advisor paper rebalance [--dry-run]` | 候補に合わせて紙上で売買する（単元株100株、売り→買い） |
+| `python -m advisor paper auto` | `check` を毎日、月が変わっていれば `rebalance`（GitHub Actions 用） |
 | `python -m advisor paper status` | 紙上の口座の損益 |
+| `python -m advisor paper resume --why '…'` | 遮断器で止まった口座を、理由を記録して再開する |
 
-GitHub Actions（`.github/workflows/stock-screen.yml`）が平日 17:10 JST に `screen --save` を回し、`reports/<日付>.md` に候補を残す。
+GitHub Actions（`.github/workflows/stock-screen.yml`）が平日 17:10 JST に `screen --save` を回して `reports/<日付>.md` に候補を残し、`data/paper-portfolio.json` がコミットされていれば `paper auto` で紙上の口座も回す。
+
+**考え方・ルールの理由・リスクヘッジは [docs/design.md](docs/design.md)。** 要点: 当てる道具ではなく「負けない形を守る」道具。土台は指数の積み立て、これは衛星。
 
 ## 使い方
 
@@ -32,12 +37,19 @@ python -m advisor paper rebalance            # 紙上で約定させる（data/p
 - 銘柄の候補は `universe/jp-large.txt`（東証の大型株67銘柄）。1行「コード.T  社名」で書き足せる。別のファイルは `--universe`
 - 単元未満株（S株など）で1株ずつ買うなら `paper rebalance --lot 1`
 
-## ルール（`advisor/strategy.py`）
+## ルール（`advisor/strategy.py`、理由は `docs/design.md`）
 
-1. **地合い**: 日経平均が200日移動平均より上のときだけ株を持つ。下なら全部現金
-2. **候補の条件**: 株価が自分の200日移動平均より上、年率の変動率が60%以下
-3. **並べ方**: 12か月の値上がり率（直近1か月を除く＝「12-1モメンタム」）が高い順
-4. 上位5銘柄を同じ金額ずつ持ち、月に1回入れ替える。取引コストは片道0.1%で計算
+買い（月初の入れ替え日）:
+1. **地合い**: 日経平均が200日移動平均より上のときだけ株を持つ。下なら全部現金。判定は月1回
+2. **候補の条件**: 株価が自分の200日移動平均より上、年率の変動率が60%以下、12-1モメンタムがプラス
+3. **並べ方**: 12か月の値上がり率（直近1か月を除く＝「12-1モメンタム」）が高い順。**同じ業種は2銘柄まで**
+4. 上位5銘柄を同じ金額ずつ持つ。取引コストは片道0.1%で計算
+
+退出（毎日）:
+5. 保有銘柄が自分の**200日線を割ったら売る**。**取得値から −20%** でも売る。次の月初まで現金
+6. **口座の遮断器**: 評価額が最高値から −20% で全部売って止める。人が理由を見て `paper resume` するまで再開しない
+
+資金のルール（コードの外）: 投資できる資産の20%以下、失っても生活が変わらない額。現物のみ、信用取引なし。NISA は使わない（指数の積み立てに使う）。
 
 モメンタム（Jegadeesh & Titman 1993）と移動平均によるトレンド追随（Faber 2007）は、長い期間・多くの市場で確かめられている数少ない規則性。それでも**将来も効く保証はない**。パラメータ（`StrategyConfig`）をいじって過去の成績を良くするほど、将来は悪くなりやすい（過学習）。
 
@@ -59,9 +71,9 @@ python -m advisor paper rebalance            # 紙上で約定させる（data/p
 ## 確認
 
 ```bash
-python -m pytest -q tests        # 10件（先読みなし・単元株の丸め・現金不足・保存と復元）
+python -m pytest -q tests        # 17件（先読みなし・業種の上限・退出・遮断器・単元株の丸め・現金不足・保存と復元）
 python -m advisor --synthetic screen
-python -m advisor --synthetic backtest
+python -m advisor --synthetic backtest --sweep   # 隣の値でも検証（過学習の確認）
 ```
 
 ## 免責

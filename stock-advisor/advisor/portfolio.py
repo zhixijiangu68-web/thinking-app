@@ -31,6 +31,10 @@ class Portfolio:
     avg_cost: dict[str, float] = field(default_factory=dict)  # ticker -> 平均取得単価
     history: list[dict] = field(default_factory=list)
     created: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    peak_equity: float = 0.0        # 遮断器の基準（評価額の最高値）
+    halted: bool = False            # 遮断器が動いた。人が `paper resume` するまで売買しない
+    halted_reason: str = ""
+    last_rebalance: str = ""        # 最後に入れ替えた日（YYYY-MM-DD）
 
     # --- 保存・読込 ---
     @classmethod
