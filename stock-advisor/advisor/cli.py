@@ -69,7 +69,9 @@ def _sanity_lines(prices: pd.DataFrame) -> list[str]:
 
 
 def _rule_line(cfg: StrategyConfig, regime: bool) -> str:
-    s = (f"12-1モメンタム上位 {cfg.top_n} 銘柄、200日線の上、年率変動率 {cfg.max_vol:.0%} 以下、"
+    how = "合成スコア（6要素）" if cfg.scoring == "composite" else "12-1モメンタム"
+    sizing = "逆ボラ配分" if cfg.weighting == "invvol" else "同額"
+    s = (f"{how}上位 {cfg.top_n} 銘柄（{sizing}）、200日線の上、年率変動率 {cfg.max_vol:.0%} 以下、"
          f"同じ業種は {cfg.max_per_sector} 銘柄まで")
     if regime:
         s += "、日経平均が200日線の上のときだけ"
