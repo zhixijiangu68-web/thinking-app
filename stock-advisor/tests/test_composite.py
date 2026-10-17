@@ -137,3 +137,56 @@ def test_start_dates_and_rolling_windows(data):
     assert len(d) > 12 and d["years"].is_monotonic_decreasing
     w = exp_rolling_windows({"x": r["equity"]}, ew, years=2)
     assert len(w) >= 3 and {"window", "ew", "x"} <= set(w.columns)
+
+
+# ---------- 案1: ボラ目標、案2: 分割入れ替え ----------
+from advisor.strategy import estimate_portfolio_vol
+from advisor.fast import tranche_backtest
+
+
+def test_vol_target_scales_exposure(data):
+    px, b = data
+    cfg0 = StrategyConfig(top_n=5, rebalance_band=0.0)
+    cfg1 = StrategyConfig(top_n=5, rebalance_band=0.0, vol_target=0.05)   # きつい目標 → 必ず 1 未満
+    f = compute_features(px, b, cfg0)
+    s0 = select_at(f, px, px.index[-1], cfg0)
+    s1 = select_at(f, px, px.index[-1], cfg1)
+    assert s0.exposure == 1.0 and abs(sum(p.weight for p in s0.picks) - 1) < 1e-9
+    assert 0 < s1.exposure < 1 and abs(sum(p.weight for p in s1.picks) - s1.exposure) < 1e-9
+    assert [p.ticker for p in s0.picks] == [p.ticker for p in s1.picks]   # 銘柄は同じ、大きさだけ違う
+    v = estimate_portfolio_vol(px, px.index[-1], {p.ticker: 0.2 for p in s0.picks})
+    assert 0.02 < v < 1.0
+    # 変動率の高い目標ならそのまま
+    s2 = select_at(f, px, px.index[-1], StrategyConfig(top_n=5, rebalance_band=0.0, vol_target=5.0))
+    assert s2.exposure == 1.0
+
+
+def test_vol_target_reduces_vol_in_backtest_and_engines_agree(data):
+    px, b = data
+    cfg = StrategyConfig(top_n=5, vol_target=0.12)
+    f = compute_features(px, b, cfg)
+    base = fast_backtest(px, b, StrategyConfig(top_n=5, rebalance_band=0.0), cost=0.0)
+    vt = fast_backtest(px, b, replace_cfg(cfg, rebalance_band=0.0), cost=0.0, feats=f)
+    assert vt["metrics"]["annual_vol"] < base["metrics"]["annual_vol"]
+    bt = run_backtest(px, b, cfg, cost=0.0)
+    bt0 = run_backtest(px, b, StrategyConfig(top_n=5), cost=0.0)
+    assert bt.metrics["annual_vol"] < bt0.metrics["annual_vol"]          # 通常版でも変動率が下がる
+    sim, pf = simulate_paper(px, f, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
+    ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
+    assert (ratio - 1).abs().max() < 0.015
+    assert pf.cash > 0.02 * sim.iloc[-1]                                  # 紙上の口座も現金を残している
+
+
+def replace_cfg(cfg, **kw):
+    from dataclasses import replace
+    return replace(cfg, **kw)
+
+
+def test_tranche_backtest_averages_sleeves(data):
+    px, b = data
+    cfg = StrategyConfig(top_n=5, rebalance_band=0.0)
+    tr = tranche_backtest(px, b, cfg, sleeves=4, cost=0.001)
+    assert len(tr["sleeves"]) == 4
+    m = pd.concat(tr["sleeves"], axis=1).mean(axis=1)
+    assert np.allclose(m.values, tr["equity"].values)
+    assert np.isfinite(tr["metrics"]["cagr"])

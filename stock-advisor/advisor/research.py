@@ -17,11 +17,12 @@ import pandas as pd
 
 from . import signals as S
 from .backtest import metrics_from_equity
-from .fast import equal_weight_equity, fast_backtest
+from .fast import equal_weight_equity, fast_backtest, tranche_backtest
 from .strategy import StrategyConfig, compute_features
 
 BASE_M12 = StrategyConfig(scoring="m12", weighting="equal", rebalance_band=0.0)
 BASE_COMP = StrategyConfig(scoring="composite", weighting="invvol", rebalance_band=0.0)
+BASE_VT = replace(BASE_M12, vol_target=0.20)   # 案1: ボラ目標 20%（docs/risk-sizing-20261017.md）
 
 
 def _cagr(eq: pd.Series) -> float:
@@ -63,11 +64,12 @@ def exp_bootstrap(prices, bench, sectors, runs: int, seed: int = 0, cost: float 
         f_m12 = compute_features(px, b, BASE_M12)
         c = fast_backtest(px, b, BASE_COMP, cost=cost, sectors=sectors, feats=f_comp)
         m = fast_backtest(px, b, BASE_M12, cost=cost, sectors=sectors, feats=f_m12)
+        v = fast_backtest(px, b, BASE_VT, cost=cost, sectors=sectors, feats=f_m12)
         days = c["equity"].index
         ew = equal_weight_equity(px, days)
-        rows.append({"run": i, "comp": _cagr(c["equity"]), "m12": _cagr(m["equity"]), "ew": _cagr(ew),
-                     "comp_sharpe": _sharpe(c["equity"]), "m12_sharpe": _sharpe(m["equity"]), "ew_sharpe": _sharpe(ew),
-                     "comp_mdd": _mdd(c["equity"]), "m12_mdd": _mdd(m["equity"]), "ew_mdd": _mdd(ew)})
+        rows.append({"run": i, "comp": _cagr(c["equity"]), "m12": _cagr(m["equity"]), "ew": _cagr(ew), "vt": _cagr(v["equity"]),
+                     "comp_sharpe": _sharpe(c["equity"]), "m12_sharpe": _sharpe(m["equity"]), "ew_sharpe": _sharpe(ew), "vt_sharpe": _sharpe(v["equity"]),
+                     "comp_mdd": _mdd(c["equity"]), "m12_mdd": _mdd(m["equity"]), "ew_mdd": _mdd(ew), "vt_mdd": _mdd(v["equity"])})
     return pd.DataFrame(rows)
 
 
@@ -191,12 +193,24 @@ def run_all(prices, bench, sectors, *, bootstrap_runs: int = 300, weight_runs: i
     log(f"[A] ブートストラップ {bootstrap_runs} 回 ({time.time()-t0:.0f}s)")
     out["B"] = exp_random_weights(prices, bench, sectors, weight_runs, cost=cost)
     log(f"[B] 重みのランダム化 {weight_runs} 回 ({time.time()-t0:.0f}s)")
-    out["C"] = {"comp": exp_offsets(prices, bench, sectors, BASE_COMP, cost=cost), "m12": exp_offsets(prices, bench, sectors, BASE_M12, cost=cost)}
-    log(f"[C] 入れ替え日のずらし 40 回 ({time.time()-t0:.0f}s)")
+    out["C"] = {"comp": exp_offsets(prices, bench, sectors, BASE_COMP, cost=cost), "m12": exp_offsets(prices, bench, sectors, BASE_M12, cost=cost),
+                "vt": exp_offsets(prices, bench, sectors, BASE_VT, cost=cost)}
+    log(f"[C] 入れ替え日のずらし 60 回 ({time.time()-t0:.0f}s)")
+    # H: 分割入れ替え（4列）。開始の週 0〜4 で回す
+    rows = []
+    for k in range(5):
+        tr = tranche_backtest(prices, bench, BASE_M12, feats=f_m12, base_offset=k, cost=cost, sectors=sectors)
+        rows.append({"offset": k, "cagr": tr["metrics"]["cagr"], "sharpe": tr["metrics"]["sharpe"], "mdd": tr["metrics"]["max_drawdown"]})
+    out["H"] = pd.DataFrame(rows)
+    out["vt_full"] = fast_backtest(prices, bench, BASE_VT, cost=cost, sectors=sectors, feats=f_m12)["metrics"]
+    out["E_roll_vt"] = exp_rolling_windows({"M12": m12["equity"], "ボラ目標": fast_backtest(prices, bench, BASE_VT, cost=cost, sectors=sectors, feats=f_m12)["equity"]}, ew)
+    log(f"[H] 分割入れ替え 20 回 ({time.time()-t0:.0f}s)")
     out["D"] = {"comp": exp_start_dates(comp["equity"], ew), "m12": exp_start_dates(m12["equity"], ew)}
     log(f"[D] 開始日のずらし ({time.time()-t0:.0f}s)")
     candidates = [
         ("M12だけ・同額", BASE_M12),
+        ("M12だけ・同額・ボラ目標20%", BASE_VT),
+        ("M12だけ・同額・ボラ目標15%", replace(BASE_M12, vol_target=0.15)),
         ("M12だけ・逆ボラ", replace(BASE_M12, weighting="invvol")),
         ("合成・同額", replace(BASE_COMP, weighting="equal")),
         ("合成・逆ボラ", BASE_COMP),
@@ -209,7 +223,7 @@ def run_all(prices, bench, sectors, *, bootstrap_runs: int = 300, weight_runs: i
     out["F"] = exp_grid(prices, bench, sectors, BASE_COMP, cost=cost)
     log(f"[F] 格子 45 回 ({time.time()-t0:.0f}s)")
     out["elapsed"] = time.time() - t0
-    out["total_runs"] = bootstrap_runs * 3 + weight_runs + 40 + len(out["D"]["comp"]) + len(out["D"]["m12"]) + len(candidates) + 45
+    out["total_runs"] = bootstrap_runs * 4 + weight_runs + 60 + 20 + 2 + len(out["D"]["comp"]) + len(out["D"]["m12"]) + len(candidates) + 45
     return out
 
 
@@ -235,6 +249,37 @@ def verdict(out: dict) -> tuple[list[tuple[str, bool, str]], bool]:
     ]
     passed = sum(ok for _, ok, _ in checks) >= 3
     return checks, passed
+
+
+def verdict_sizing(out: dict) -> tuple[list[tuple[str, bool, str]], bool, list[tuple[str, bool, str]], bool]:
+    """docs/risk-sizing-20261017.md の案1（ボラ目標）と案2（分割入れ替え）の合格基準。"""
+    A, E = out["A"], out["E"]
+    t = E["table"].set_index("label")
+    base_out, vt_out = t.loc["M12だけ・同額"], t.loc["M12だけ・同額・ボラ目標20%"]
+    c1 = bool(vt_out["out_sharpe"] >= base_out["out_sharpe"] + 0.10 and vt_out["out_mdd"] >= base_out["out_mdd"] + 0.05)
+    c2 = float((A["vt_sharpe"] > A["m12_sharpe"]).mean())
+    base_full, vt_full = out["base"]["m12"], out["vt_full"]
+    c3 = bool(vt_full["cagr"] >= base_full["cagr"] - 0.03)
+    R = out["E_roll_vt"]
+    # 窓ごとのシャープは持っていないので、年率で代用（事前基準は「シャープ」だが窓のシャープは計算していない → 年率で判定し、明記する）
+    c4 = float((R["ボラ目標"] > R["M12"]).mean())
+    checks1 = [
+        (f"1. 後半のシャープ +0.10 以上かつ最大下落 5 ポイント以上浅い（基準 {base_out['out_sharpe']:.2f}/{base_out['out_mdd']:.0%} → ボラ目標 {vt_out['out_sharpe']:.2f}/{vt_out['out_mdd']:.0%}）", c1, ""),
+        (f"2. ブートストラップでシャープが基準より良い割合 {c2:.0%}（65% 以上）", bool(c2 >= 0.65), ""),
+        (f"3. 全期間の年率が基準より 3 ポイント以上は下がらない（{base_full['cagr']:+.1%} → {vt_full['cagr']:+.1%}）", c3, ""),
+        (f"4. 3年の窓で基準より良い窓 {c4:.0%}（60% 以上。窓のシャープは出していないので年率で判定）", bool(c4 >= 0.60), ""),
+    ]
+    pass1 = sum(ok for _, ok, _ in checks1) >= 3
+    C, H = out["C"]["m12"], out["H"]
+    single_range = float(C["cagr"].max() - C["cagr"].min())
+    tr_range = float(H["cagr"].max() - H["cagr"].min())
+    med_diff = float(H["cagr"].median() - C["cagr"].median())
+    checks2 = [
+        (f"年率の幅: 1列 {single_range:.1%} → 4列 {tr_range:.1%}（半分以下）", bool(tr_range <= single_range / 2), ""),
+        (f"年率の中央値の差 {med_diff:+.1%}（±1 ポイント）", bool(abs(med_diff) <= 0.01), ""),
+    ]
+    pass2 = all(ok for _, ok, _ in checks2)
+    return checks1, pass1, checks2, pass2
 
 
 def report(out: dict, title: str = "1000回の検証") -> str:
@@ -287,6 +332,28 @@ def report(out: dict, title: str = "1000回の検証") -> str:
     for r in R.itertuples():
         L.append(f"| {r.window} | {getattr(r, '合成'):+.1%} | {r.M12:+.1%} | {r.ew:+.1%} |")
     L.append(f"\n均等に勝った窓: 合成 {(R['合成'] > R['ew']).mean():.0%}、M12 {(R['M12'] > R['ew']).mean():.0%}")
+    if "vt_full" in out:
+        checks1, pass1, checks2, pass2 = verdict_sizing(out)
+        v = out["vt_full"]; bm = out["base"]["m12"]
+        L += ["", "## G. 案1: ボラ目標 20%（順張りのまま、ポジションの大きさの規律）", ""]
+        L.append("| 全期間 | 年率 | シャープ | 最大下落 | 年率変動率 |"); L.append("|---|---:|---:|---:|---:|")
+        L.append(f"| M12 だけ（基準） | {bm['cagr']:+.1%} | {bm['sharpe']:.2f} | {bm['max_drawdown']:.1%} | {bm['annual_vol']:.1%} |")
+        L.append(f"| M12 + ボラ目標 20% | {v['cagr']:+.1%} | {v['sharpe']:.2f} | {v['max_drawdown']:.1%} | {v['annual_vol']:.1%} |")
+        L.append(f"\nブートストラップ {len(A)} 本: 年率の中央値 {A['vt'].median():+.1%}（基準 {A['m12'].median():+.1%}）、シャープの中央値 {A['vt_sharpe'].median():.2f}（基準 {A['m12_sharpe'].median():.2f}）、最大下落の中央値 {A['vt_mdd'].median():.1%}（基準 {A['m12_mdd'].median():.1%}）")
+        L.append(f"入れ替え日のずらし: ボラ目標 {out['C']['vt']['cagr'].min():+.1%}〜{out['C']['vt']['cagr'].max():+.1%}")
+        L.append("")
+        for text, ok, _ in checks1:
+            L.append(f"- {'合格' if ok else '不合格'}: {text}")
+        L.append(f"\n**案1の判定: {'合格（3つ以上）' if pass1 else '不合格'}**")
+        H = out["H"]
+        L += ["", "## H. 案2: 分割入れ替え（4列、週をずらす）", ""]
+        L.append("| 開始の週 | 年率 | シャープ | 最大下落 |"); L.append("|---:|---:|---:|---:|")
+        for r in H.itertuples():
+            L.append(f"| {int(r.offset)} | {r.cagr:+.1%} | {r.sharpe:.2f} | {r.mdd:.1%} |")
+        L.append("")
+        for text, ok, _ in checks2:
+            L.append(f"- {'合格' if ok else '不合格'}: {text}")
+        L.append(f"\n**案2の判定: {'合格' if pass2 else '不合格'}**")
     F = out["F"]
     L += ["", "## F. 格子（上位の数 × 業種上限 × 1銘柄の上限）", ""]
     L.append(f"年率 {F['cagr'].min():+.1%}〜{F['cagr'].max():+.1%}、シャープ {F['sharpe'].min():.2f}〜{F['sharpe'].max():.2f}。最良: " +

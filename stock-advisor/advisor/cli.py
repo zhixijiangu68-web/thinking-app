@@ -34,7 +34,8 @@ REPORT_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 
 def _cfg(args) -> StrategyConfig:
-    return StrategyConfig(top_n=args.top, use_regime=args.regime, scoring=args.scoring, weighting=args.weighting)
+    return StrategyConfig(top_n=args.top, use_regime=args.regime, scoring=args.scoring, weighting=args.weighting,
+                          vol_target=args.vol_target)
 
 
 def _load(args, start: str, extra: list[str] | None = None):
@@ -91,6 +92,8 @@ def _rule_line(cfg: StrategyConfig, regime: bool) -> str:
 
 def _guard_line(cfg: StrategyConfig) -> str:
     parts = []
+    if cfg.vol_target:
+        parts.append(f"ボラ目標 {cfg.vol_target:.0%}")
     if cfg.exit_below_trend:
         parts.append("200日線割れで退出")
     if cfg.stop_loss:
@@ -111,6 +114,8 @@ def cmd_screen(args) -> int:
     lines = [f"# 買う候補（{sel.asof.date()} 時点）", ""]
     lines.append(f"- ルール: {_rule_line(cfg, cfg.use_regime and bench is not None)}（{_guard_line(cfg)}）")
     lines.append(f"- 候補の母数: {len(prices.columns)} 銘柄、条件を満たしたのは {sel.eligible} 銘柄")
+    if cfg.vol_target:
+        lines.append(f"- ボラ目標 {cfg.vol_target:.0%}: 見積もり変動率 {sel.est_vol:.0%} → 株の比率 {sel.exposure:.0%}（残りは現金）")
     if sel.sector_skipped:
         lines.append("- 業種の上限で外した: " + ", ".join(f"{t} {names.get(t, '')}" for t in sel.sector_skipped))
     lines.append("")
@@ -121,6 +126,9 @@ def cmd_screen(args) -> int:
         lines.append("|---:|---|---|---|---:|---:|---:|---:|")
         for i, p in enumerate(sel.picks, 1):
             lines.append(f"| {i} | {p.ticker} | {names.get(p.ticker, '')} | {p.sector} | {p.price:,.0f} | {p.price * 100:,.0f} | {p.momentum:+.1%} | {p.vol:.0%} |")
+        need = sum(p.price * 100 for p in sel.picks)
+        lines.append("")
+        lines.append(f"- {len(sel.picks)} 銘柄を1単元（100株）ずつ買うのに必要な資金: {need:,.0f}円。同額で持つなら、いちばん高い1単元 × {len(sel.picks)} ≈ {max(p.price for p in sel.picks) * 100 * len(sel.picks):,.0f}円")
     lines += _sanity_lines(prices)
     lines.append("")
     lines.append("※ 投資判断の参考情報で、利益を保証するものではない。買うかどうかは自分で決める。")
@@ -159,6 +167,8 @@ def cmd_backtest(args) -> int:
         print(f"| {label} | {fmt.format(m[key])} | {b} | {u} |")
     print("\n※ 日経平均は株価指数（配当を含まない）。ルールと「均等に買い持ち」は配当込みの調整後終値。"
           "候補は今の大型株なので、生き残った銘柄だけを見ている（生存バイアス）。")
+    print(f"※ 税引き前。月1回入れ替えると利益を毎年実現するので、税引き後の年率はおおよそ ×0.8 = {m['cagr'] * 0.8:+.1%}。"
+          "買い持ちは売らないぶん税を繰り延べるので、税引き後の差はもっと縮む。")
     print(f"\n入れ替え {int(m['rebalances'])} 回、売買 {int(m['trades'])} 件、株を持っていた日の割合 {m['time_in_market']:.0%}")
     print(f"退出: 200日線割れ {int(m['exit_trend'])} 回 / 取得値 −{cfg.stop_loss:.0%} {int(m['exit_stop'])} 回 / "
           f"株価なし {int(m['exit_missing'])} 回、遮断器 {int(m['dd_stops'])} 回")
@@ -380,6 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--regime", action="store_true", help="日経平均が200日線の下なら全部現金にする（既定では使わない）")
     p.add_argument("--scoring", choices=["m12", "composite"], default="m12", help="並べ方（m12 = 12-1モメンタムだけ、composite = 合成スコア）")
     p.add_argument("--weighting", choices=["equal", "invvol"], default="equal", help="比率（equal = 同額、invvol = 逆ボラティリティ）")
+    p.add_argument("--vol-target", type=float, default=0.0, help="ボラティリティ目標（年率、例 0.20）。0 = 使わない")
     p.add_argument("--synthetic", action="store_true", help="乱数の株価で動かす（動作確認用）")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--refresh", action="store_true", help="キャッシュを使わず取り直す")

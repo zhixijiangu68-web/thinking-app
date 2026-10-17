@@ -94,3 +94,16 @@ def fast_backtest(
 def equal_weight_equity(prices: pd.DataFrame, days: pd.DatetimeIndex) -> pd.Series:
     r = prices.ffill().pct_change().loc[days].mean(axis=1).fillna(0.0)
     return (1 + r).cumprod()
+
+
+def tranche_backtest(prices, bench, cfg, *, sleeves: int = 4, base_offset: int = 0, feats=None, **kw) -> dict:
+    """分割入れ替え: 月を sleeves 等分し、各列を違う週に入れ替える。評価額は各列（同額）の平均。"""
+    if feats is None:
+        feats = compute_features(prices, bench, cfg)
+    step = 20 // sleeves
+    curves = []
+    for k in range(sleeves):
+        r = fast_backtest(prices, bench, cfg, feats=feats, rebalance_offset=base_offset + k * step, **kw)
+        curves.append(r["equity"])
+    eq = pd.concat(curves, axis=1).mean(axis=1)
+    return {"equity": eq, "metrics": metrics_from_equity(eq), "sleeves": curves}

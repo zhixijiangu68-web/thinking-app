@@ -150,11 +150,11 @@ def plan_orders(
     orders: list[Order] = []
     cash = pf.cash
     if isinstance(targets, dict):
-        tot_w = sum(targets.values())
-        tw_of = {t: (w / tot_w if tot_w > 0 else 0.0) for t, w in targets.items()}
+        tw_of = dict(targets)          # 比率はそのまま（合計が 1 未満なら、その分は現金に残す = ボラ目標）
         targets = list(targets)
     else:
         tw_of = {t: 1.0 / len(targets) for t in targets} if targets else {}
+    exposure = min(1.0, sum(tw_of.values())) if tw_of else 0.0
 
     # 1) 対象から外れた銘柄は全部売る
     for t, n in list(pf.positions.items()):
@@ -172,7 +172,7 @@ def plan_orders(
     total = max(0.0, (cash + sum(n * prices[t] for t, n in pf.positions.items() if t in targets)) - cash_reserve)
     kept = [t for t in targets if pf.positions.get(t, 0) > 0 and band > 0
             and abs(pf.positions[t] * prices[t] - total * tw_of[t]) <= band * total * tw_of[t]]
-    investable = max(0.0, total - sum(pf.positions[t] * prices[t] for t in kept))
+    investable = max(0.0, total * exposure - sum(pf.positions[t] * prices[t] for t in kept))
     targets = [t for t in targets if t not in kept]
     if not targets:
         return orders, []
@@ -208,21 +208,23 @@ def plan_orders(
             orders.append(Order(t, "sell", have - want, prices[t], reason="比率を下げる"))
             cash += (have - want) * prices[t]
 
-    # 5) 増やす分を買う。現金が足りなければ、いちばん大きい買いから1単元ずつ減らす
+    # 5) 増やす分を買う。使える現金は「株に充てる予算 − いま active に入っている分」まで（ボラ目標の現金は残す）
+    in_active = sum(min(pf.positions.get(t, 0), target_shares[t]) * prices[t] for t in active)
+    buy_cap = max(0.0, min(cash - cash_reserve, investable - in_active))
     buys = {t: want - pf.positions.get(t, 0) for t, want in target_shares.items() if want > pf.positions.get(t, 0)}
     spend = lambda: sum(n * prices[t] for t, n in buys.items())
-    while buys and spend() > cash - cash_reserve + 1e-6:
+    while buys and spend() > buy_cap + 1e-6:
         biggest = max(buys, key=lambda t: buys[t] * prices[t])
         buys[biggest] -= lot
         if buys[biggest] <= 0:
             del buys[biggest]
-    # 6) 余った現金で、上位から1単元ずつ足す（目標額の1.5倍まで）
+    # 6) 余った予算で、上位から1単元ずつ足す（目標額の1.5倍まで）
     changed = True
     while changed:
         changed = False
         for t in active:
             held_after = pf.positions.get(t, 0) + buys.get(t, 0)
-            if (held_after + lot) * prices[t] <= 1.5 * amt[t] and spend() + lot * prices[t] <= cash - cash_reserve + 1e-6:
+            if (held_after + lot) * prices[t] <= 1.5 * amt[t] and spend() + lot * prices[t] <= buy_cap + 1e-6:
                 buys[t] = buys.get(t, 0) + lot
                 changed = True
     for t, n in buys.items():

@@ -43,6 +43,8 @@ class StrategyConfig:
     weighting: str = "equal"        # 比率: "equal"（同額）か "invvol"（逆ボラティリティ、上限 max_weight・下限 min_weight）
     max_weight: float = 0.20
     min_weight: float = 0.05
+    vol_target: float = 0.0         # ボラティリティ目標（年率）。0 = 使わない。選んだ銘柄の直近 vol_window 日の共分散から
+                                    # 全部持ったときの変動率を見積もり、目標を超えるぶんだけ株の比率を下げて現金にする
 
     @property
     def min_history(self) -> int:
@@ -77,6 +79,8 @@ class Selection:
     eligible: int = 0
     reason: str = ""
     sector_skipped: list[str] = field(default_factory=list)  # 業種の上限で外した銘柄
+    exposure: float = 1.0        # 株に充てる比率の合計（ボラ目標で 1 未満になる）
+    est_vol: float = float("nan")  # 選んだ組み合わせの見積もり変動率（年率）
 
 
 def compute_features(prices: pd.DataFrame, bench: pd.Series | None, cfg: StrategyConfig) -> Features:
@@ -158,15 +162,34 @@ def select_at(
         picks.append(Pick(ticker=t, score=float(r.score), momentum=float(r.momentum),
                           vol=float(r.vol), price=float(r.price), sector=sec))
     reason = "" if picks else "条件を満たす銘柄がない（上昇トレンドかつ12-1モメンタムがプラスの銘柄なし）ので現金"
+    exposure, est_vol = 1.0, float("nan")
     if picks:
         if cfg.weighting == "invvol":
             w = S.inverse_vol_weights(pd.Series({p.ticker: p.vol for p in picks}), cfg.max_weight, cfg.min_weight)
         else:
             w = {p.ticker: 1.0 / len(picks) for p in picks}
+        if cfg.vol_target and cfg.vol_target > 0:
+            est_vol = estimate_portfolio_vol(prices, asof, w, cfg.vol_window)
+            if est_vol and est_vol > 0 and not np.isnan(est_vol):
+                exposure = float(min(1.0, cfg.vol_target / est_vol))
         for p in picks:
-            p.weight = w.get(p.ticker, 0.0)
+            p.weight = w.get(p.ticker, 0.0) * exposure
     return Selection(asof=asof, invested=bool(picks), picks=picks, eligible=int(len(elig)),
-                     reason=reason, sector_skipped=skipped)
+                     reason=reason, sector_skipped=skipped, exposure=exposure, est_vol=est_vol)
+
+
+def estimate_portfolio_vol(prices: pd.DataFrame, asof: pd.Timestamp, weights: dict[str, float], window: int = 60) -> float:
+    """比率 weights で持ったときの年率変動率の見積もり（直近 window 日の共分散から）。"""
+    tickers = [t for t in weights if t in prices.columns]
+    if not tickers:
+        return float("nan")
+    r = prices[tickers].loc[:asof].ffill().tail(window + 1).pct_change().dropna(how="all")
+    if len(r) < max(10, window // 2):
+        return float("nan")
+    cov = r.cov().values * 252.0
+    w = np.array([weights[t] for t in tickers])
+    v = float(w @ np.nan_to_num(cov) @ w)
+    return float(np.sqrt(v)) if v > 0 else float("nan")
 
 
 @dataclass
@@ -217,13 +240,12 @@ def target_weights(current: dict[str, float], targets: dict[str, float] | list[s
         return {}
     if isinstance(targets, (list, tuple)):
         targets = {t: 1.0 / len(targets) for t in targets}
-    tot = sum(targets.values())
-    targets = {t: w / tot for t, w in targets.items()} if tot > 0 else targets
+    exposure = sum(targets.values())   # 1 未満ならその分は現金（ボラ目標）
     kept = {t: current[t] for t, tw in targets.items() if t in current and band > 0 and abs(current[t] - tw) <= band * tw}
     rest = {t: tw for t, tw in targets.items() if t not in kept}
     out = dict(kept)
     if rest:
-        room = max(0.0, 1.0 - sum(kept.values()))
+        room = max(0.0, exposure - sum(kept.values()))
         rs = sum(rest.values())
         out.update({t: room * tw / rs for t, tw in rest.items()})
     return out
