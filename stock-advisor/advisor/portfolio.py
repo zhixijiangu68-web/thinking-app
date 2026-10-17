@@ -34,6 +34,7 @@ class Portfolio:
     peak_equity: float = 0.0        # 遮断器の基準（評価額の最高値）
     halted: bool = False            # 遮断器が動いた。人が `paper resume` するまで売買しない
     halted_reason: str = ""
+    halted_on: str = ""             # 遮断器が動いた日（YYYY-MM-DD）
     last_rebalance: str = ""        # 最後に入れ替えた日（YYYY-MM-DD）
     pending: list[dict] = field(default_factory=list)  # 約定待ちの注文（判断した日の引け後に出し、翌営業日に約定）
 

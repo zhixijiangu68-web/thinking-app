@@ -156,12 +156,14 @@ def run_backtest(
                     counts[sig.reason] += 1
 
         peak = max(peak, eq)
+        fired_today = False
         if cfg.portfolio_dd_stop and weights and eq / peak - 1 <= -cfg.portfolio_dd_stop and not halted:
             todays = [(i + execution_lag, "exit", (t, "dd_stop")) for t in weights]
             counts["dd_stop"] += 1
             halted = True
+            fired_today = True
 
-        if d in rb:
+        if d in rb and not fired_today:
             if halted:
                 halted = False  # 実運用では人が理由を見て再開する。検証では次の月初に再開したとみなす
                 peak = eq

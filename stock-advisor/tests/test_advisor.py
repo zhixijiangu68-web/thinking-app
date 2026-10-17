@@ -319,3 +319,70 @@ def test_plan_orders_invariants_random():
 
 
 from advisor.broker import PaperBroker  # noqa: E402  (上のテストで使う)
+
+
+# ---------- 検証ラウンド4: バックテストと紙上の口座が同じ判断をするか ----------
+from advisor.engine import daily_step, simulate_paper, last_prices
+
+
+def _pair(seed=3, n=20, **kw):
+    T = [f"{1000+i}.T" for i in range(n)]
+    px = synthetic_prices(T, "2016-01-01", "2022-12-30", seed=seed)
+    b = synthetic_prices(["^B"], "2016-01-01", "2022-12-30", seed=seed + 1)["^B"]
+    cfg = StrategyConfig(top_n=5, **kw)
+    return px, b, cfg, compute_features(px, b, cfg)
+
+
+def test_paper_matches_backtest_without_breaker():
+    """単元1株・十分な現金なら、紙上の口座の評価額はバックテストとほぼ一致する（差は判断日と約定日の株価差だけ）。"""
+    px, b, cfg, feats = _pair(portfolio_dd_stop=0.0)
+    bt = run_backtest(px, b, cfg, cost=0.0, execution_lag=1)
+    sim, _ = simulate_paper(px, feats, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
+    ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
+    assert (ratio - 1).abs().max() < 0.01
+
+
+def test_paper_matches_backtest_with_breaker():
+    """遮断器ありでも、しきい値ぎりぎりの1日差を除けば一致する。"""
+    px, b, cfg, feats = _pair()
+    bt = run_backtest(px, b, cfg, cost=0.0, execution_lag=1)
+    sim, pf = simulate_paper(px, feats, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
+    ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
+    assert (ratio - 1).abs().max() < 0.06
+    assert abs(ratio.iloc[-1] - 1) < 0.04
+
+
+def test_breaker_on_rebalance_day_does_not_reenter_same_day():
+    idx = pd.bdate_range("2018-01-01", "2019-06-28")
+    n = len(idx); T = [f"{1000+i}.T" for i in range(6)]
+    up = np.linspace(100, 300, n)
+    px = pd.DataFrame({t: up * (1 + 0.01 * i) for i, t in enumerate(T)}, index=idx)
+    crash = [d for d in idx if d.month == 5 and d.year == 2019][0]   # 5月の最初の営業日 = 入れ替え日
+    px.loc[idx >= crash] *= 0.7
+    cfg = StrategyConfig(top_n=3, exit_below_trend=False, stop_loss=0.0, use_regime=False, max_per_sector=0)
+    bt = run_backtest(px, None, cfg, cost=0.0, execution_lag=0)
+    t = bt.trades
+    assert (t[t.date == crash].why == "dd_stop").all() and (t.date == crash).sum() == 3
+    assert t[(t.date > crash) & (t.date < pd.Timestamp("2019-06-01"))].empty   # 5月中は何もしない
+    # 紙上の口座も同じ: 遮断器の日に入れ替えない、翌日に約定、月内は止まったまま
+    feats = compute_features(px, None, cfg)
+    sim, pf = simulate_paper(px, feats, cfg, cash=1e9, lot=1, start=idx[250])
+    sells = [h for h in pf.history if h["side"] == "sell" and "遮断器" in h["reason"]]
+    assert sells and all(h["when"] == str(idx[idx.get_loc(crash) + 1].date()) for h in sells)
+    buys_after = [h for h in pf.history if h["side"] == "buy" and str(crash.date()) < h["when"] < "2019-06-01"]
+    assert buys_after == []
+
+
+def test_cli_auto_twice_same_day_does_not_double_fill(tmp_path):
+    from advisor.cli import main
+    f = str(tmp_path / "pf.json")
+    base = ["--synthetic", "--seed", "0", "paper", "--file", f]
+    assert main(base + ["init", "--cash", "5000000"]) == 0
+    assert main(base + ["auto"]) == 0
+    pf1 = Portfolio.load(f)
+    assert pf1.pending and pf1.positions == {}
+    assert main(base + ["auto"]) == 0            # 同じ日にもう一度 → 約定しない、二重に注文しない
+    pf2 = Portfolio.load(f)
+    assert pf2.positions == {} and len(pf2.pending) == len(pf1.pending)
+    assert main(base + ["auto", "--dry-run"]) == 0
+    assert Portfolio.load(f).pending == pf2.pending

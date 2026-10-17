@@ -24,10 +24,10 @@ from pathlib import Path
 import pandas as pd
 
 from .backtest import run_backtest, sweep_variants
-from .broker import PaperBroker
 from .data import load_prices, sanity_report
-from .portfolio import DEFAULT_PORTFOLIO_FILE, Order, Portfolio, fill_pending, plan_orders, queue_orders
-from .strategy import StrategyConfig, compute_features, exit_signals, select_at
+from .engine import StepReport, daily_step, last_prices
+from .portfolio import DEFAULT_PORTFOLIO_FILE, Order, Portfolio
+from .strategy import StrategyConfig, compute_features, select_at
 from .universe import DEFAULT_BENCHMARK, load_universe_info
 
 REPORT_DIR = Path(__file__).resolve().parent.parent / "reports"
@@ -53,11 +53,6 @@ def _load(args, start: str):
 
 def _recent_start() -> str:
     return f"{date.today().year - 3}-01-01"
-
-
-def _last_prices(prices: pd.DataFrame) -> dict[str, float]:
-    last = prices.ffill().iloc[-1]
-    return {t: float(v) for t, v in last.items() if pd.notna(v)}
 
 
 def _sanity_lines(prices: pd.DataFrame) -> list[str]:
@@ -178,94 +173,46 @@ def _print_orders(orders: list[Order]) -> None:
         print(f"| {'買' if o.side == 'buy' else '売'} | {o.ticker} | {o.shares:,} | {o.price:,.0f} | {o.value:,.0f} | {o.reason} |")
 
 
-def _submit(pf: Portfolio, orders: list[Order], asof, args) -> None:
-    """注文を出す。既定は翌営業日の終値で約定（約定待ちに入れる）。--fill-now なら今日の終値で約定。"""
-    if args.fill_now:
-        PaperBroker(pf, when=str(asof.date())).execute(orders)
-        print("\n（--fill-now: 今日の終値で約定させた）")
-    else:
-        queue_orders(pf, orders, str(asof.date()))
-        print("\n（約定待ちに入れた。次の営業日の `paper auto` / `check` でその日の終値で約定する）")
-
-
-def _paper_fill_pending(pf: Portfolio, last, asof, args) -> None:
-    if not pf.pending:
+def _print_step(rep: StepReport, pf: Portfolio, names: dict[str, str], args) -> None:
+    if rep.filled and not args.fill_now:
+        print(f"## 約定待ちの注文を {rep.asof.date()} の終値で約定")
+        _print_orders(rep.filled)
+        print()
+    for n in rep.notes:
+        print(f"- {n}")
+    if pf.halted and not rep.breaker:
         return
-    filled = fill_pending(pf, last, str(asof.date()), lot=args.lot)
-    print(f"## 約定待ちの注文を {asof.date()} の終値で約定")
-    if filled:
-        _print_orders(filled)
+    print(f"- 評価額 {rep.equity:,.0f}円（最高値から {rep.drawdown:+.1%}）")
+    if rep.exits:
+        print("\n## 退出")
+        _print_orders(rep.exits)
     else:
-        print("- 約定なし")
-    if pf.pending:
-        print(f"- まだ待ち: {', '.join(p['ticker'] for p in pf.pending)}（株価がとれない）")
-    print()
-
-
-def _paper_check(pf: Portfolio, cfg, feats, prices, last, names, asof, dry_run: bool, args=None) -> list[Order]:
-    """退出ルールと遮断器。売る注文を返す（dry_run なら反映しない）。"""
-    orders: list[Order] = []
-    if pf.halted:
-        print(f"- 遮断器で停止中（{pf.halted_reason}）。`paper resume --why '理由'` で再開するまで何もしない")
-        return orders
-    sigs = exit_signals(feats, prices, asof, cfg, {t: pf.avg_cost.get(t, 0.0) for t in pf.positions})
-    for s in sigs:
-        why = {"trend": "200日線を割った", "stop": f"取得値から {s.change:+.1%}（−{cfg.stop_loss:.0%} の保険）",
-               "missing": "株価がとれない（上場廃止かデータ障害。売れるか確かめる）"}[s.reason]
-        orders.append(Order(s.ticker, "sell", pf.positions[s.ticker], s.price, reason=f"退出: {why}"))
-    eq = pf.equity(last)
-    pf.peak_equity = max(pf.peak_equity, eq)
-    dd = eq / pf.peak_equity - 1 if pf.peak_equity > 0 else 0.0
-    print(f"- 評価額 {eq:,.0f}円（最高値 {pf.peak_equity:,.0f}円から {dd:+.1%}）")
-    breaker = bool(cfg.portfolio_dd_stop and pf.positions and dd <= -cfg.portfolio_dd_stop)
-    if breaker:
-        for t, n in pf.positions.items():
-            if t in last and all(o.ticker != t for o in orders):
-                orders.append(Order(t, "sell", n, last[t], reason="遮断器: 全部売って止める"))
-    if not orders:
         print("- 退出する銘柄なし")
-        return orders
-    _print_orders(orders)
-    if dry_run:
-        print("\n（--dry-run なので口座には反映していない）")
-        return orders
-    _submit(pf, orders, asof, args)
-    if breaker:
-        pf.halted = True
-        pf.halted_reason = f"{asof.date()} に評価額が最高値から {dd:.1%}"
-        print(f"\n**遮断器が動いた。** 全部売って止めた。理由を調べて `paper resume --why '…'` で再開する")
-    return orders
-
-
-def _paper_rebalance(pf: Portfolio, cfg, feats, prices, last, names, sectors, asof, args) -> list[Order]:
-    if pf.halted:
-        print(f"- 遮断器で停止中（{pf.halted_reason}）。入れ替えしない")
-        return []
-    sel = select_at(feats, prices, asof, cfg, sectors)
-    targets = [p.ticker for p in sel.picks] if sel.invested else []
-    # 退出の予定と入れ替えが同じ日なら、入れ替えの目標が優先（バックテストと同じ扱い）
-    dropped = [p for p in pf.pending if p["side"] == "sell" and p["ticker"] in targets and p["reason"].startswith("退出")]
-    if dropped and not args.dry_run:
-        pf.pending = [p for p in pf.pending if p not in dropped]
-        print("- 入れ替えの目標に残るので退出を取り消した: " + ", ".join(p["ticker"] for p in dropped))
-    orders, skipped = plan_orders(pf, targets, last, lot=args.lot, cash_reserve=args.reserve, names=names)
-    if not sel.invested:
-        print(f"- {sel.reason}")
-    print(f"- 目標: {', '.join(f'{t} {names.get(t, '')}' for t in targets) or '現金のみ'}")
-    for t in skipped:
-        print(f"- 資金が足りず外した: {t} {names.get(t, '')}（1単元 {args.lot}株 = {last[t] * args.lot:,.0f}円）")
-    if not orders:
-        print("- 注文なし（すでに目標どおり）")
-    else:
-        _print_orders(orders)
+    if rep.breaker:
+        print(f"\n**遮断器が動いた。** 全部売って止める。理由を調べて `paper resume --why '…'` で再開する")
+    if rep.rebalanced:
+        sel = rep.selection
+        print("\n## 入れ替え")
+        if sel is not None and not sel.invested:
+            print(f"- {sel.reason}")
+        print(f"- 目標: {', '.join(f'{t} {names.get(t, '')}' for t in rep.targets) or '現金のみ'}")
+        if rep.dropped_exits:
+            print("- 入れ替えの目標に残るので退出を取り消した: " + ", ".join(rep.dropped_exits))
+        for t in rep.skipped:
+            print(f"- 資金が足りず外した: {t} {names.get(t, '')}")
+        if rep.rebalance_orders:
+            _print_orders(rep.rebalance_orders)
+        else:
+            print("- 注文なし（すでに目標どおり）")
+    elif args.paper_cmd == "auto":
+        print(f"\n- 入れ替えは月1回（最後: {pf.last_rebalance or 'まだ'}）。今日はしない")
+    if rep.orders:
         if args.dry_run:
             print("\n（--dry-run なので口座には反映していない）")
-            return orders
-        _submit(pf, orders, asof, args)
-    if not args.dry_run:
-        pf.last_rebalance = str(asof.date())
-        pf.peak_equity = max(pf.peak_equity, pf.equity(last))
-    return orders
+        elif args.fill_now:
+            print("\n（--fill-now: 今日の終値で約定させた）")
+        else:
+            print("\n（約定待ちに入れた。次の営業日の `paper auto` / `check` でその日の終値で約定する）")
 
 
 class _Tee(io.TextIOBase):
@@ -318,6 +265,7 @@ def _cmd_paper(args) -> int:
             print("止まっていません")
             return 0
         pf.halted = False
+        pf.halted_on = ""
         pf.peak_equity = 0.0  # 次の check で、いまの評価額が新しい基準になる
         pf.history.append({"when": datetime.now().isoformat(timespec="seconds"), "event": "resume",
                            "halted_reason": pf.halted_reason, "why": args.why})
@@ -328,9 +276,9 @@ def _cmd_paper(args) -> int:
 
     cfg = _cfg(args)
     names, sectors, prices, bench = _load(args, start=_recent_start())
-    last = _last_prices(prices)
     asof = prices.index[-1]
     args._asof = asof.date()
+    last = last_prices(prices, asof)
 
     if args.paper_cmd == "status":
         eq = pf.equity(last)
@@ -341,7 +289,7 @@ def _cmd_paper(args) -> int:
             print(f"- **遮断器で停止中**: {pf.halted_reason}")
         print(f"- 最後の入れ替え: {pf.last_rebalance or 'まだ'}")
         if pf.pending:
-            print(f"- 約定待ち: " + ", ".join(f"{p['side']} {p['ticker']} {p['shares']}株" for p in pf.pending))
+            print("- 約定待ち: " + ", ".join(f"{p['side']} {p['ticker']} {p['shares']}株" for p in pf.pending))
         for line in _sanity_lines(prices.loc[:, [t for t in pf.positions if t in prices.columns]] if pf.positions else prices.iloc[:, :0]):
             print(line)
         if pf.positions:
@@ -357,22 +305,12 @@ def _cmd_paper(args) -> int:
     feats = compute_features(prices, bench, cfg)
     title = {"check": "退出判定", "rebalance": "入れ替え", "auto": "自動運用"}[args.paper_cmd]
     print(f"# 紙上の{title}（{asof.date()} の終値）")
-    if not args.dry_run:
-        _paper_fill_pending(pf, last, asof, args)
     for line in _sanity_lines(prices):
         print(line)
-    if args.paper_cmd == "check":
-        _paper_check(pf, cfg, feats, prices, last, names, asof, args.dry_run, args)
-    elif args.paper_cmd == "rebalance":
-        _paper_rebalance(pf, cfg, feats, prices, last, names, sectors, asof, args)
-    elif args.paper_cmd == "auto":
-        _paper_check(pf, cfg, feats, prices, last, names, asof, args.dry_run, args)
-        due = (not pf.last_rebalance) or pf.last_rebalance[:7] != str(asof.date())[:7]
-        if due:
-            print("\n## 月が変わったので入れ替え")
-            _paper_rebalance(pf, cfg, feats, prices, last, names, sectors, asof, args)
-        else:
-            print(f"\n- 入れ替えは月1回（最後: {pf.last_rebalance}）。今日はしない")
+    rebalance = {"check": False, "rebalance": True, "auto": None}[args.paper_cmd]
+    rep = daily_step(pf, cfg, feats, prices, asof, sectors=sectors, names=names, lot=args.lot,
+                     cash_reserve=args.reserve, fill_now=args.fill_now, rebalance=rebalance, dry_run=args.dry_run)
+    _print_step(rep, pf, names, args)
     if not args.dry_run:
         pf.save(path)
         print(f"\n保存: {path}（現金 {pf.cash:,.0f}円）")
