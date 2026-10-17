@@ -14,7 +14,10 @@ on:
         default: "yes"
       bootstrap:
         description: "ブートストラップの本数"
-        default: "300"
+        default: "200"
+      universe:
+        description: "候補リスト"
+        default: "universe/jp-wide.txt"
 
 permissions:
   contents: write
@@ -35,30 +38,41 @@ jobs:
           cache-dependency-path: stock-advisor/requirements.txt
       - run: pip install -r requirements.txt
       - name: 実データでバックテスト
+        env:
+          UNIVERSE: ${{ github.event.inputs.universe || 'universe/jp-wide.txt' }}
         run: |
           mkdir -p reports
-          python -m advisor backtest --start "${{ github.event.inputs.start || '2010-01-01' }}" --sweep --by-year \
+          python -m advisor --universe "$UNIVERSE" backtest --start "${{ github.event.inputs.start || '2010-01-01' }}" --sweep --by-year \
             | tee "reports/backtest-$(date -u +%Y-%m-%d).md"
       - name: 今日の候補
         run: python -m advisor screen --save
       - name: 合成スコアのバックテスト
+        env:
+          UNIVERSE: ${{ github.event.inputs.universe || 'universe/jp-wide.txt' }}
         run: |
-          python -m advisor --scoring composite --weighting invvol backtest --start "${{ github.event.inputs.start || '2010-01-01' }}" --by-year \
+          python -m advisor --universe "$UNIVERSE" --scoring composite --weighting invvol backtest --start "${{ github.event.inputs.start || '2010-01-01' }}" --by-year \
             | tee "reports/backtest-composite-$(date -u +%Y-%m-%d).md"
       - name: 1000回の検証（ブートストラップ・重み・日取り・開始日・前半後半・格子）
         if: ${{ github.event.inputs.research != 'no' }}
+        env:
+          UNIVERSE: ${{ github.event.inputs.universe || 'universe/jp-wide.txt' }}
         run: |
-          python -m advisor research --start "${{ github.event.inputs.start || '2010-01-01' }}" \
-            --bootstrap "${{ github.event.inputs.bootstrap || '300' }}" --save
+          python -m advisor --universe "$UNIVERSE" research --start "${{ github.event.inputs.start || '2010-01-01' }}" \
+            --bootstrap "${{ github.event.inputs.bootstrap || '200' }}" --save
       - name: 取得できた銘柄の数
         if: always()
+        env:
+          UNIVERSE: ${{ github.event.inputs.universe || 'universe/jp-wide.txt' }}
         run: |
           echo "キャッシュ: $(ls data/cache/*.csv | wc -l) 銘柄"
           python - <<'PY'
+          import os
           from advisor.data import load_prices
           from advisor.universe import load_universe
-          px = load_prices(list(load_universe()), start="2010-01-01")
+          u = load_universe(os.environ["UNIVERSE"])
+          px = load_prices(list(u), start="2010-01-01")
           print(px.shape, px.index[0].date(), px.index[-1].date())
+          print("取得できない:", [t for t in u if t not in px.columns])
           print("履歴が短い:", [c for c in px.columns if px[c].notna().sum() < 2500])
           PY
       - name: reports/ をコミット
