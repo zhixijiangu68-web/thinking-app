@@ -259,6 +259,8 @@ def sweep_variants(base: StrategyConfig) -> list[tuple[str, StrategyConfig]]:
     v += [("退出ルールなし", replace(base, exit_below_trend=False, stop_loss=0.0))]
     v += [("遮断器なし", replace(base, portfolio_dd_stop=0.0))]
     v += [("毎回均等に戻す", replace(base, rebalance_band=0.0))]
+    v += [("モメンタムだけ（上位8・地合いなし・退出なし・遮断器なし）",
+           replace(base, top_n=8, use_regime=False, exit_below_trend=False, stop_loss=0.0, portfolio_dd_stop=0.0))]
     return v
 
 
