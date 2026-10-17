@@ -1,4 +1,4 @@
-# 手動で起動: 実データ（Yahoo Finance）で 2010 年からのバックテストと今日の候補を出し、reports/ にコミットする
+# 手動で起動（または この file の push）: 実データ（Yahoo Finance）で 2010 年からのバックテストと今日の候補を出し、reports/ にコミットする
 name: stock-backtest
 
 on:

@@ -126,11 +126,14 @@ def cmd_backtest(args) -> int:
     print(f"- {'月' if args.freq == 'M' else '週'}1回入れ替え、片道コスト {args.cost:.2%}、約定は判断の {args.lag} 営業日後の終値、"
           f"退出: 200日線割れ / 取得値 −{cfg.stop_loss:.0%}、遮断器: 最高値から −{cfg.portfolio_dd_stop:.0%}")
     print()
-    print("| | ルール | ベンチマーク(買い持ち) |")
-    print("|---|---:|---:|")
+    print("| | ルール | 日経平均(買い持ち・配当なし) | 候補67銘柄を均等に買い持ち |".replace("67", str(len(prices.columns))))
+    print("|---|---:|---:|---:|")
     for label, key, fmt in _ROWS:
         b = fmt.format(res.bench_metrics[key]) if res.bench_metrics and key in res.bench_metrics else "-"
-        print(f"| {label} | {fmt.format(m[key])} | {b} |")
+        u = fmt.format(res.universe_metrics[key]) if res.universe_metrics and key in res.universe_metrics else "-"
+        print(f"| {label} | {fmt.format(m[key])} | {b} | {u} |")
+    print("\n※ 日経平均は株価指数（配当を含まない）。ルールと「均等に買い持ち」は配当込みの調整後終値。"
+          "候補は今の大型株なので、生き残った銘柄だけを見ている（生存バイアス）。")
     print(f"\n入れ替え {int(m['rebalances'])} 回、売買 {int(m['trades'])} 件、株を持っていた日の割合 {m['time_in_market']:.0%}")
     print(f"退出: 200日線割れ {int(m['exit_trend'])} 回 / −{cfg.stop_loss:.0%} {int(m['exit_stop'])} 回 / "
           f"株価なし {int(m['exit_missing'])} 回、遮断器 {int(m['dd_stops'])} 回")
@@ -139,11 +142,12 @@ def cmd_backtest(args) -> int:
               f"（{int(m['exits_judged'])} 件、売った後の平均 {m['exit_avg_fwd_return']:+.1%}）")
     if args.by_year and res.yearly is not None:
         print("\n## 年ごと\n")
-        print("| 年 | ルール | ベンチマーク |")
-        print("|---|---:|---:|")
+        print("| 年 | ルール | 日経平均 | 均等に買い持ち |")
+        print("|---|---:|---:|---:|")
         for y, row in res.yearly.iterrows():
             b = f"{row['benchmark']:+.1%}" if "benchmark" in row and pd.notna(row["benchmark"]) else "-"
-            print(f"| {y} | {row['strategy']:+.1%} | {b} |")
+            u = f"{row['universe']:+.1%}" if "universe" in row and pd.notna(row["universe"]) else "-"
+            print(f"| {y} | {row['strategy']:+.1%} | {b} | {u} |")
 
     if args.sweep:
         print("\n## 隣の値で結果がどう変わるか（大きく変わるなら、その値を信じない）\n")

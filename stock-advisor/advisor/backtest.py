@@ -22,7 +22,9 @@ class BacktestResult:
     trades: pd.DataFrame
     metrics: dict[str, float]
     bench_metrics: dict[str, float] | None
-    yearly: pd.DataFrame | None = None   # 年ごとのリターン（strategy / benchmark）
+    yearly: pd.DataFrame | None = None   # 年ごとのリターン（strategy / benchmark / universe）
+    universe_equity: pd.Series | None = None   # 候補の全銘柄を均等に買い持ち（同じ銘柄・同じ配当込みの比較）
+    universe_metrics: dict[str, float] | None = None
 
 
 def rebalance_dates(index: pd.DatetimeIndex, freq: str = "M") -> list[pd.Timestamp]:
@@ -54,7 +56,7 @@ def metrics_from_equity(eq: pd.Series) -> dict[str, float]:
     }
 
 
-def yearly_table(equity: pd.Series, bench_eq: pd.Series | None) -> pd.DataFrame:
+def yearly_table(equity: pd.Series, bench_eq: pd.Series | None, uni_eq: pd.Series | None = None) -> pd.DataFrame:
     def yr(s: pd.Series) -> pd.Series:
         e = s.dropna()
         first = e.groupby(e.index.year).first()
@@ -65,7 +67,15 @@ def yearly_table(equity: pd.Series, bench_eq: pd.Series | None) -> pd.DataFrame:
     out = pd.DataFrame({"strategy": yr(equity)})
     if bench_eq is not None:
         out["benchmark"] = yr(bench_eq)
+    if uni_eq is not None:
+        out["universe"] = yr(uni_eq)
     return out
+
+
+def equal_weight_equity(prices: pd.DataFrame, days: pd.DatetimeIndex) -> pd.Series:
+    """候補の全銘柄を毎日均等に持ったときの評価額（株価のない銘柄はその日は除く）。"""
+    r = prices.pct_change().loc[days].mean(axis=1).fillna(0.0)
+    return (1 + r).cumprod()
 
 
 def run_backtest(
@@ -194,6 +204,9 @@ def run_backtest(
             bench_eq = b / b.iloc[0]
             bench_m = metrics_from_equity(bench_eq)
 
+    uni_eq = equal_weight_equity(prices, days)
+    uni_m = metrics_from_equity(uni_eq)
+
     trades_df = pd.DataFrame(trades, columns=["date", "ticker", "from", "to", "why"])
     m = metrics_from_equity(equity)
     m.update({
@@ -205,7 +218,8 @@ def run_backtest(
     m.update(exit_quality(trades_df, filled))
     return BacktestResult(
         equity=equity, bench_equity=bench_eq, trades=trades_df,
-        metrics=m, bench_metrics=bench_m, yearly=yearly_table(equity, bench_eq),
+        metrics=m, bench_metrics=bench_m, yearly=yearly_table(equity, bench_eq, uni_eq),
+        universe_equity=uni_eq, universe_metrics=uni_m,
     )
 
 
@@ -231,7 +245,8 @@ def exit_quality(trades: pd.DataFrame, prices: pd.DataFrame, horizon: int = 21) 
 def sweep_variants(base: StrategyConfig) -> list[tuple[str, StrategyConfig]]:
     """過学習の確認用: 基準から1つずつ値を変えた設定。結果が値で大きく変わるなら疑う。"""
     v: list[tuple[str, StrategyConfig]] = [("基準", base)]
-    v += [(f"上位{n}", replace(base, top_n=n)) for n in (3, 8) if n != base.top_n]
+    v += [(f"上位{n}", replace(base, top_n=n)) for n in (3, 8, 10) if n != base.top_n]
+    v += [("上位8・業種3まで", replace(base, top_n=8, max_per_sector=3))]
     v += [("6-1モメンタム", replace(base, mom_lookback=126))]
     v += [(f"トレンド{w}日", replace(base, trend_window=w, regime_window=w)) for w in (150, 250)]
     v += [("地合いなし", replace(base, use_regime=False))]
