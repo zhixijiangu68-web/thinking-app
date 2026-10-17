@@ -43,6 +43,7 @@ class StrategyConfig:
     weighting: str = "equal"        # 比率: "equal"（同額）か "invvol"（逆ボラティリティ、上限 max_weight・下限 min_weight）
     max_weight: float = 0.20
     min_weight: float = 0.05
+    sleeves: int = 1                # 分割入れ替えの列の数（1 = 月初に全部。4 = 4列を第1〜4週に分けて入れ替える。docs/risk-sizing-20261017.md 案2）
     vol_target: float = 0.0         # ボラティリティ目標（年率）。0 = 使わない。選んだ銘柄の直近 vol_window 日の共分散から
                                     # 全部持ったときの変動率を見積もり、目標を超えるぶんだけ株の比率を下げて現金にする
 
@@ -248,4 +249,24 @@ def target_weights(current: dict[str, float], targets: dict[str, float] | list[s
         room = max(0.0, exposure - sum(kept.values()))
         rs = sum(rest.values())
         out.update({t: room * tw / rs for t, tw in rest.items()})
+    return out
+
+
+def trading_day_of_month(index: pd.DatetimeIndex) -> pd.Series:
+    """各日が、その月の何営業日目か（0 始まり）。"""
+    s = pd.Series(np.arange(len(index)), index=index)
+    return s.groupby(index.to_period("M")).cumcount()
+
+
+def sleeve_due_day(k: int, sleeves: int) -> int:
+    """列 k が入れ替える日（月の営業日目）。4 列なら 0, 5, 10, 15。"""
+    return k * (20 // max(sleeves, 1))
+
+
+def combine_sleeves(sleeves: dict[int, dict[str, float]], n: int) -> dict[str, float]:
+    """各列の目標比率（列の中で合計 ≤ 1）を、全体の目標比率に（列は同額）。"""
+    out: dict[str, float] = {}
+    for w in sleeves.values():
+        for t, x in w.items():
+            out[t] = out.get(t, 0.0) + x / n
     return out

@@ -16,7 +16,7 @@ import pandas as pd
 
 from .broker import PaperBroker
 from .portfolio import LOT_SIZE, Order, Portfolio, fill_pending, plan_orders, queue_orders
-from .strategy import Features, Selection, StrategyConfig, exit_signals, select_at
+from .strategy import (Features, Selection, StrategyConfig, combine_sleeves, exit_signals, select_at, sleeve_due_day)
 
 EXIT_REASON = {
     "trend": "200日線を割った",
@@ -34,6 +34,7 @@ class StepReport:
     drawdown: float = 0.0
     equity: float = 0.0
     rebalanced: bool = False
+    sleeves_refreshed: list[int] = field(default_factory=list)
     selection: Selection | None = None
     targets: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)        # 資金が足りず外した
@@ -106,14 +107,38 @@ def daily_step(
             if t in last and t not in done and t not in pending_exit:
                 rep.exits.append(Order(t, "sell", n, last[t], reason="遮断器: 全部売って止める"))
 
-    # 4) 入れ替え
-    month_changed = (not pf.last_rebalance) or pf.last_rebalance[:7] != when[:7]
-    do_rebalance = (rebalance if rebalance is not None else month_changed) and not rep.breaker
+    # 4) 入れ替え（列ごと。列 k は月の k×(20/列数) 営業日目以降、その月にまだなら入れ替える。回し忘れた日があっても次の日に拾う）
+    n_sleeves = max(1, cfg.sleeves)
+    month = when[:7]
+    in_month = prices.index[(prices.index <= asof) & (prices.index.to_period("M") == asof.to_period("M"))]
+    tdm = len(in_month) - 1
+    if rebalance is True:
+        due = list(range(n_sleeves))
+    elif rebalance is False:
+        due = []
+    else:
+        due = [k for k in range(n_sleeves)
+               if tdm >= sleeve_due_day(k, n_sleeves) and pf.sleeve_month.get(str(k)) != month]
+        if n_sleeves == 1 and not pf.sleeve_month and pf.last_rebalance[:7] == month:
+            due = []   # 古い口座ファイル（列の記録がない）で、今月すでに入れ替えていたら二重にしない
+    do_rebalance = bool(due) and not rep.breaker
     if do_rebalance:
         sel = select_at(feats, prices, asof, cfg, sectors)
         rep.selection = sel
-        rep.targets = [p.ticker for p in sel.picks] if sel.invested else []
-        target_w = {p.ticker: p.weight for p in sel.picks} if sel.invested else {}
+        rep.sleeves_refreshed = due
+        new_w = {p.ticker: p.weight for p in sel.picks} if sel.invested else {}
+        for k in due:
+            pf.sleeves[str(k)] = new_w
+            pf.sleeve_month[str(k)] = month
+        # 列の数が変わっていたら、古い列は捨てる
+        for key in list(pf.sleeves):
+            if int(key) >= n_sleeves:
+                del pf.sleeves[key]; pf.sleeve_month.pop(key, None)
+        if n_sleeves > 1:
+            target_w = combine_sleeves({int(k): w for k, w in pf.sleeves.items()}, n_sleeves)
+        else:
+            target_w = new_w
+        rep.targets = list(target_w)
         # 退出の予定と入れ替えが同じ日なら、入れ替えの目標が優先（バックテストと同じ扱い）
         rep.dropped_exits = [o.ticker for o in rep.exits if o.ticker in rep.targets]
         rep.exits = [o for o in rep.exits if o.ticker not in rep.targets]

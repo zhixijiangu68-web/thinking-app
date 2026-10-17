@@ -190,3 +190,63 @@ def test_tranche_backtest_averages_sleeves(data):
     m = pd.concat(tr["sleeves"], axis=1).mean(axis=1)
     assert np.allclose(m.values, tr["equity"].values)
     assert np.isfinite(tr["metrics"]["cagr"])
+
+
+# ---------- 案2: 分割入れ替えを本番の手順で ----------
+from advisor.strategy import trading_day_of_month, sleeve_due_day, combine_sleeves
+from advisor.engine import daily_step
+from advisor.portfolio import Portfolio
+
+
+def test_sleeve_helpers():
+    idx = pd.bdate_range("2024-01-01", "2024-03-31")
+    tdm = trading_day_of_month(idx)
+    assert tdm.iloc[0] == 0 and tdm.loc["2024-02-01"] == 0 and tdm.iloc[5] == 5 and tdm.loc["2024-03-01"] == 0
+    assert [sleeve_due_day(k, 4) for k in range(4)] == [0, 5, 10, 15]
+    assert sleeve_due_day(0, 1) == 0
+    w = combine_sleeves({0: {"A": 0.5, "B": 0.5}, 1: {"A": 0.5, "C": 0.25}}, 2)
+    assert w == {"A": 0.5, "B": 0.25, "C": 0.125}
+
+
+def test_sleeves_backtest_matches_engine(data):
+    px, b = data
+    cfg = StrategyConfig(top_n=5, sleeves=4)
+    f = compute_features(px, b, cfg)
+    bt = run_backtest(px, b, cfg, cost=0.0)
+    assert bt.metrics["rebalances"] > run_backtest(px, b, StrategyConfig(top_n=5), cost=0.0).metrics["rebalances"] * 3
+    sim, pf = simulate_paper(px, f, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
+    ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
+    # 4列は判断の回数が4倍で、バンドの境界ぎりぎりの判断の違いが積み重なる。論理は同じなので 5% まで許す
+    assert (ratio - 1).abs().max() < 0.05
+    assert set(pf.sleeves) == {"0", "1", "2", "3"}
+
+
+def test_sleeves_engine_due_logic_catches_missed_days(data):
+    """回し忘れた日があっても、その月の列は次に回した日に入れ替わる。同じ月に二度は入れ替えない。"""
+    px, b = data
+    cfg = StrategyConfig(top_n=5, sleeves=4)
+    f = compute_features(px, b, cfg)
+    pf = Portfolio(cash=1e8, peak_equity=1e8)
+    idx = px.index
+    month = idx[-40].to_period("M")
+    days = [d for d in idx if d.to_period("M") == month]
+    # 月の 0 日目と 7 日目だけ回す（5 日目を飛ばす）
+    r0 = daily_step(pf, cfg, f, px, days[0], lot=1, fill_now=True)
+    assert r0.sleeves_refreshed == [0]
+    r7 = daily_step(pf, cfg, f, px, days[7], lot=1, fill_now=True)
+    assert r7.sleeves_refreshed == [1]                      # 5 日目の列を拾う
+    r8 = daily_step(pf, cfg, f, px, days[8], lot=1, fill_now=True)
+    assert r8.sleeves_refreshed == [] and not r8.rebalanced   # 二度はしない
+    r16 = daily_step(pf, cfg, f, px, days[16], lot=1, fill_now=True)
+    assert r16.sleeves_refreshed == [2, 3]                  # 10 日目と 15 日目をまとめて拾う
+
+
+def test_tranche_fast_close_to_full(data):
+    px, b = data
+    cfg = StrategyConfig(top_n=5, sleeves=4, rebalance_band=0.0)
+    f = compute_features(px, b, cfg)
+    full = run_backtest(px, b, cfg, cost=0.001)
+    fast = tranche_backtest(px, b, cfg, feats=f, cost=0.001)
+    a = fast["equity"]; c = full.equity.reindex(a.index)
+    # 高速版は4列を別々の資金で持つ近似。全体で一つの口座にする本番の手順とは数%ずれてよい
+    assert abs(fast["metrics"]["cagr"] - full.metrics["cagr"]) < 0.03

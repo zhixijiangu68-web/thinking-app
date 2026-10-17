@@ -35,7 +35,7 @@ REPORT_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 def _cfg(args) -> StrategyConfig:
     return StrategyConfig(top_n=args.top, use_regime=args.regime, scoring=args.scoring, weighting=args.weighting,
-                          vol_target=args.vol_target)
+                          vol_target=args.vol_target, sleeves=args.sleeves)
 
 
 def _load(args, start: str, extra: list[str] | None = None):
@@ -94,6 +94,8 @@ def _guard_line(cfg: StrategyConfig) -> str:
     parts = []
     if cfg.vol_target:
         parts.append(f"ボラ目標 {cfg.vol_target:.0%}")
+    if cfg.sleeves > 1:
+        parts.append(f"{cfg.sleeves}列に分けて週ごとに入れ替え")
     if cfg.exit_below_trend:
         parts.append("200日線割れで退出")
     if cfg.stop_loss:
@@ -237,7 +239,7 @@ def _print_step(rep: StepReport, pf: Portfolio, names: dict[str, str], args) -> 
         print(f"\n**遮断器が動いた。** 全部売って止める。理由を調べて `paper resume --why '…'` で再開する")
     if rep.rebalanced:
         sel = rep.selection
-        print("\n## 入れ替え")
+        print("\n## 入れ替え" + (f"（列 {', '.join(str(k + 1) for k in rep.sleeves_refreshed)} を更新）" if len(pf.sleeves) > 1 or rep.sleeves_refreshed and max(rep.sleeves_refreshed) > 0 else ""))
         if sel is not None and not sel.invested:
             print(f"- {sel.reason}")
         print(f"- 目標: {', '.join(f'{t} {names.get(t, '')}' for t in rep.targets) or '現金のみ'}")
@@ -391,6 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scoring", choices=["m12", "composite"], default="m12", help="並べ方（m12 = 12-1モメンタムだけ、composite = 合成スコア）")
     p.add_argument("--weighting", choices=["equal", "invvol"], default="equal", help="比率（equal = 同額、invvol = 逆ボラティリティ）")
     p.add_argument("--vol-target", type=float, default=0.0, help="ボラティリティ目標（年率、例 0.20）。0 = 使わない")
+    p.add_argument("--sleeves", type=int, default=1, help="分割入れ替えの列の数（1 = 月初に全部、4 = 週をずらして4列）")
     p.add_argument("--synthetic", action="store_true", help="乱数の株価で動かす（動作確認用）")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--refresh", action="store_true", help="キャッシュを使わず取り直す")

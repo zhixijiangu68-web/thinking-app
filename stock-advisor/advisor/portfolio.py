@@ -37,6 +37,8 @@ class Portfolio:
     halted_on: str = ""             # 遮断器が動いた日（YYYY-MM-DD）
     last_rebalance: str = ""        # 最後に入れ替えた日（YYYY-MM-DD）
     pending: list[dict] = field(default_factory=list)  # 約定待ちの注文（判断した日の引け後に出し、翌営業日に約定）
+    sleeves: dict = field(default_factory=dict)         # 分割入れ替えの列ごとの目標比率 {"0": {ticker: weight}, ...}
+    sleeve_month: dict = field(default_factory=dict)    # 列ごとに最後に入れ替えた月 {"0": "YYYY-MM"}
 
     # --- 保存・読込 ---
     @classmethod

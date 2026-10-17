@@ -12,7 +12,8 @@ from dataclasses import dataclass, replace
 import numpy as np
 import pandas as pd
 
-from .strategy import StrategyConfig, compute_features, exit_signals, select_at, target_weights
+from .strategy import (StrategyConfig, combine_sleeves, compute_features, exit_signals, select_at, sleeve_due_day,
+                       target_weights, trading_day_of_month)
 
 
 @dataclass
@@ -123,6 +124,9 @@ def run_backtest(
         raise ValueError("検証できる期間が短すぎます。データの開始日を早くするか、期間を広げてください。")
 
     rb = set(rebalance_dates(days, freq))
+    tdm = trading_day_of_month(idx)   # 月の何営業日目かは、検証の開始日ではなくデータ全体で数える
+    sleeve_w: dict[int, dict[str, float]] = {}
+    sleeve_month: dict[int, str] = {}
     weights: dict[str, float] = {}
     entry: dict[str, float] = {}     # ticker -> 取得値
     eq, peak = 1.0, 1.0
@@ -197,12 +201,24 @@ def run_backtest(
             halted = True
             fired_today = True
 
-        if d in rb and not fired_today:
+        if cfg.sleeves > 1 and freq == "M":
+            # 列 k は月の k×(20/列数) 営業日目以降、その月にまだなら入れ替える（紙上の口座と同じ「拾う」規則）
+            month = str(d.to_period("M"))
+            due = [k for k in range(cfg.sleeves)
+                   if int(tdm.loc[d]) >= sleeve_due_day(k, cfg.sleeves) and sleeve_month.get(k) != month]
+            rebalance_today = bool(due)
+        else:
+            due = [0]
+            rebalance_today = d in rb
+        if rebalance_today and not fired_today:
             if halted:
                 halted = False  # 実運用では人が理由を見て再開する。検証では次の月初に再開したとみなす
                 peak = eq
             sel = select_at(feats, prices, d, cfg, sectors)
-            targets = {p.ticker: p.weight for p in sel.picks} if sel.invested else {}
+            for k in due:
+                sleeve_w[k] = {p.ticker: p.weight for p in sel.picks} if sel.invested else {}
+                sleeve_month[k] = str(d.to_period("M"))
+            targets = combine_sleeves(sleeve_w, cfg.sleeves) if cfg.sleeves > 1 else sleeve_w[0]
             # 退出の予定と入れ替えが同じ日なら、入れ替えの目標が優先（退出銘柄は目標に入らない）
             todays = [p for p in todays if p[1] != "exit" or p[2][0] not in targets]
             # 比率は判断した日の保有比率から決める（紙上の口座が判断した日の株価で株数を決めるのと同じ）
@@ -240,7 +256,7 @@ def run_backtest(
     trades_df = pd.DataFrame(trades, columns=["date", "ticker", "from", "to", "why"])
     m = metrics_from_equity(equity)
     m.update({
-        "rebalances": float(len(rb)), "trades": float(len(trades)),
+        "rebalances": float(len(rb) * (cfg.sleeves if freq == "M" else 1)), "trades": float(len(trades)),
         "exit_trend": float(counts["trend"]), "exit_stop": float(counts["stop"]),
         "exit_missing": float(counts["missing"]),
         "dd_stops": float(len({r["date"] for r in trades if r["why"] == "dd_stop"})),
