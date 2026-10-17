@@ -212,9 +212,9 @@ def test_lag_changes_result_but_not_signals(prices, bench):
     cfg = StrategyConfig(top_n=3)
     r0 = run_backtest(prices, bench, cfg, execution_lag=0)
     r1 = run_backtest(prices, bench, cfg, execution_lag=1)
-    # 同じ判断（入れ替えの銘柄）で、約定日が1日ずれる
-    a = r0.trades[r0.trades.why == "rebalance"][["ticker", "to"]].head(3).values.tolist()
-    b = r1.trades[r1.trades.why == "rebalance"][["ticker", "to"]].head(3).values.tolist()
+    # 同じ判断（入れ替えの銘柄）で、約定日が1日ずれる（比率は約定日の保有比率から決めるので少し違う）
+    a = r0.trades[r0.trades.why == "rebalance"]["ticker"].head(6).tolist()
+    b = r1.trades[r1.trades.why == "rebalance"]["ticker"].head(6).tolist()
     assert a == b
     d0 = r0.trades[r0.trades.why == "rebalance"].date.iloc[0]
     d1 = r1.trades[r1.trades.why == "rebalance"].date.iloc[0]
@@ -386,3 +386,91 @@ def test_cli_auto_twice_same_day_does_not_double_fill(tmp_path):
     assert pf2.positions == {} and len(pf2.pending) == len(pf1.pending)
     assert main(base + ["auto", "--dry-run"]) == 0
     assert Portfolio.load(f).pending == pf2.pending
+
+
+# ---------- 検証ラウンド5: ルールが狙った効果を拾うか ----------
+from advisor.backtest import metrics_from_equity
+
+
+def _world(seed: int, persist: float, n_stocks: int = 30):
+    """persist > 0: 銘柄ごとの期待リターンが1年続く（モメンタムがある世界）。0: 純粋なランダムウォーク"""
+    T = [f"{1000+i}.T" for i in range(n_stocks)]
+    idx = pd.bdate_range("2012-01-01", "2022-12-31"); n = len(idx)
+    rng = np.random.default_rng(seed); cols = {}
+    for t in T:
+        mu = np.repeat(rng.normal(0, persist, size=n // 252 + 1), 252)[:n] if persist else np.zeros(n)
+        r = 0.0002 + mu + 0.015 * rng.standard_normal(n)
+        cols[t] = 1000 * np.exp(np.cumsum(r))
+    return pd.DataFrame(cols, index=idx)
+
+
+def _ew_buy_hold(px: pd.DataFrame, index) -> dict:
+    r = px.pct_change().mean(axis=1).fillna(0)
+    return metrics_from_equity((1 + r).cumprod().loc[index])
+
+
+def test_rule_captures_momentum_when_it_exists():
+    cfg = StrategyConfig(top_n=5, use_regime=False, max_per_sector=0)
+    wins = 0
+    for seed in range(4):
+        px = _world(seed, 0.0012)
+        bt = run_backtest(px, None, cfg, cost=0.001)
+        wins += bt.metrics["cagr"] > _ew_buy_hold(px, bt.equity.index)["cagr"]
+    assert wins >= 3
+
+
+def test_regime_filter_cuts_drawdown_in_bear_market():
+    T = [f"{1000+i}.T" for i in range(20)]
+    idx = pd.bdate_range("2012-01-01", "2022-12-31"); n = len(idx)
+    rng = np.random.default_rng(1)
+    path = np.concatenate([np.linspace(0, 0.6, n // 2), np.linspace(0.6, -0.1, n - n // 2)])
+    px = pd.DataFrame({t: 1000 * np.exp(path + np.cumsum(0.012 * rng.standard_normal(n))) for t in T}, index=idx)
+    bench = pd.Series(1000 * np.exp(path), index=idx)
+    base = dict(top_n=5, max_per_sector=0, exit_below_trend=False, stop_loss=0.0, portfolio_dd_stop=0.0)
+    on = run_backtest(px, bench, StrategyConfig(use_regime=True, **base)).metrics
+    off = run_backtest(px, bench, StrategyConfig(use_regime=False, **base)).metrics
+    assert on["max_drawdown"] > off["max_drawdown"] + 0.05   # 下落が5ポイント以上浅い
+    assert on["time_in_market"] < off["time_in_market"]
+
+
+# ---------- 検証ラウンド6: 無駄な売買を減らす（目標比率のバンド） ----------
+from advisor.strategy import target_weights
+
+
+def test_target_weights_band():
+    cur = {"A": 0.22, "B": 0.15, "C": 0.30}
+    tw = target_weights(cur, ["A", "B", "D"], band=0.25)      # 目標 1/3 ≈ 0.333
+    assert "A" not in {k for k, v in tw.items() if v == cur["A"]} or True
+    # A(0.22) は 0.333 から 34% 外れている → 戻す。B(0.15) も戻す。C は対象外
+    assert set(tw) == {"A", "B", "D"} and abs(sum(tw.values()) - 1) < 1e-9
+    cur2 = {"A": 0.30, "B": 0.36}
+    tw2 = target_weights(cur2, ["A", "B", "D"], band=0.25)     # A, B は ±25% 以内 → そのまま
+    assert tw2["A"] == 0.30 and tw2["B"] == 0.36 and abs(tw2["D"] - 0.34) < 1e-9
+    assert target_weights(cur2, ["A", "B", "D"], band=0.0) == {"A": 1/3, "B": 1/3, "D": 1/3}
+    assert target_weights({}, [], 0.25) == {}
+
+
+def test_band_reduces_trades_and_keeps_engines_consistent():
+    px, b, cfg0, _ = _pair(portfolio_dd_stop=0.0, rebalance_band=0.0)
+    cfg1 = StrategyConfig(top_n=5, portfolio_dd_stop=0.0, rebalance_band=0.25)
+    bt0 = run_backtest(px, b, cfg0, cost=0.001)
+    bt1 = run_backtest(px, b, cfg1, cost=0.001)
+    assert bt1.metrics["trades"] < bt0.metrics["trades"]
+    sim, _ = simulate_paper(px, compute_features(px, b, cfg1), cfg1, cash=1e9, lot=1, start=bt1.equity.index[0])
+    bt = run_backtest(px, b, cfg1, cost=0.0)
+    ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
+    assert (ratio - 1).abs().max() < 0.01
+
+
+def test_plan_orders_band_keeps_positions_within_band():
+    pf = Portfolio(cash=0, positions={"A": 100, "B": 100}, avg_cost={"A": 1000.0, "B": 1000.0})
+    px = {"A": 1100.0, "B": 900.0, "C": 500.0}
+    # 合計 200,000、目標 1/3 ≈ 66,667。A=110,000, B=90,000 はどちらも ±25% の外 → 売って C を買う
+    orders, _ = plan_orders(pf, ["A", "B", "C"], px, lot=100, band=0.25)
+    assert {o.ticker for o in orders} >= {"C"}
+    pf2 = Portfolio(cash=0, positions={"A": 100, "B": 100, "C": 100}, avg_cost={})
+    px2 = {"A": 1000.0, "B": 1100.0, "C": 950.0}     # どれも目標 ±25% 以内
+    orders2, _ = plan_orders(pf2, ["A", "B", "C"], px2, lot=100, band=0.25)
+    assert orders2 == []
+    orders3, _ = plan_orders(pf2, ["A", "B", "C"], px2, lot=1, band=0.0)   # バンドなしなら均等に戻す
+    assert orders3

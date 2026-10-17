@@ -33,6 +33,7 @@ class StrategyConfig:
     stop_loss: float = 0.20         # 取得値から −20% で売る（0 = 使わない）
     portfolio_dd_stop: float = 0.20 # 評価額が最高値から −20% で全部売って止める（0 = 使わない）
     max_missing_days: int = 5       # 株価がこれ以上の営業日とれない銘柄は、最後の値で退出（上場廃止・データ障害）
+    rebalance_band: float = 0.25    # 残る銘柄は、目標比率から ±25% 以内なら触らない（無駄な売買を減らす。0 = 毎回均等に戻す）
 
     @property
     def min_history(self) -> int:
@@ -175,4 +176,19 @@ def exit_signals(
             out.append(ExitSignal(t, "trend", float(px), chg))
         elif cfg.stop_loss and chg <= -cfg.stop_loss:
             out.append(ExitSignal(t, "stop", float(px), chg))
+    return out
+
+
+def target_weights(current: dict[str, float], targets: list[str], band: float) -> dict[str, float]:
+    """入れ替え日の目標比率。残る銘柄は目標（1/N）から ±band 以内なら今の比率のまま、
+    それ以外（新しい銘柄・はみ出た銘柄）で残りを均等に分ける。current は評価額に対する比率。"""
+    if not targets:
+        return {}
+    tw = 1.0 / len(targets)
+    kept = {t: current[t] for t in targets if t in current and band > 0 and abs(current[t] - tw) <= band * tw}
+    rest = [t for t in targets if t not in kept]
+    out = dict(kept)
+    if rest:
+        each = max(0.0, 1.0 - sum(kept.values())) / len(rest)
+        out.update({t: each for t in rest})
     return out

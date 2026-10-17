@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .backtest import run_backtest, sweep_variants
+from .backtest import run_backtest, sweep_costs, sweep_variants
 from .data import load_prices, sanity_report
 from .engine import StepReport, daily_step, last_prices
 from .portfolio import DEFAULT_PORTFOLIO_FILE, Order, Portfolio
@@ -92,10 +92,10 @@ def cmd_screen(args) -> int:
     if not sel.invested:
         lines.append(f"**今回は買わない。** {sel.reason}")
     else:
-        lines.append("| 順位 | 銘柄 | 社名 | 業種 | 終値 | 12-1モメンタム | 年率変動率 |")
-        lines.append("|---:|---|---|---|---:|---:|---:|")
+        lines.append("| 順位 | 銘柄 | 社名 | 業種 | 終値 | 1単元(100株) | 12-1モメンタム | 年率変動率 |")
+        lines.append("|---:|---|---|---|---:|---:|---:|---:|")
         for i, p in enumerate(sel.picks, 1):
-            lines.append(f"| {i} | {p.ticker} | {names.get(p.ticker, '')} | {p.sector} | {p.price:,.0f} | {p.momentum:+.1%} | {p.vol:.0%} |")
+            lines.append(f"| {i} | {p.ticker} | {names.get(p.ticker, '')} | {p.sector} | {p.price:,.0f} | {p.price * 100:,.0f} | {p.momentum:+.1%} | {p.vol:.0%} |")
     lines += _sanity_lines(prices)
     lines.append("")
     lines.append("※ 投資判断の参考情報で、利益を保証するものではない。買うかどうかは自分で決める。")
@@ -151,6 +151,12 @@ def cmd_backtest(args) -> int:
         print("|---|---:|---:|---:|---:|")
         for label, c in sweep_variants(cfg):
             r = run_backtest(prices, bench, c, end=args.end, cost=args.cost, freq=args.freq, sectors=sectors,
+                             execution_lag=args.lag).metrics
+            print(f"| {label} | {r['cagr']:+.1%} | {r['max_drawdown']:.1%} | {r['sharpe']:.2f} | {int(r['trades'])} |")
+        for label, c in sweep_costs():
+            if abs(c - args.cost) < 1e-12:
+                continue
+            r = run_backtest(prices, bench, cfg, end=args.end, cost=c, freq=args.freq, sectors=sectors,
                              execution_lag=args.lag).metrics
             print(f"| {label} | {r['cagr']:+.1%} | {r['max_drawdown']:.1%} | {r['sharpe']:.2f} | {int(r['trades'])} |")
 

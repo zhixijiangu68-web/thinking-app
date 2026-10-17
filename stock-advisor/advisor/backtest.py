@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 import pandas as pd
 
-from .strategy import StrategyConfig, compute_features, exit_signals, select_at
+from .strategy import StrategyConfig, compute_features, exit_signals, select_at, target_weights
 
 
 @dataclass
@@ -117,7 +117,7 @@ def run_backtest(
         turnover = sum(abs(new.get(t, 0.0) - weights.get(t, 0.0)) for t in tickers)
         eq *= 1 - cost * turnover
         for t in tickers:
-            if abs(new.get(t, 0.0) - weights.get(t, 0.0)) > 1e-9:
+            if abs(new.get(t, 0.0) - weights.get(t, 0.0)) > 1e-6:
                 trades.append({"date": d, "ticker": t, "from": weights.get(t, 0.0), "to": new.get(t, 0.0), "why": why})
             if t in new and t not in weights:
                 entry[t] = float(filled.at[d, t])
@@ -144,7 +144,8 @@ def run_backtest(
                 if t in weights:
                     sell(t, d, why)
             elif kind == "target":
-                execute_target(payload, d, "rebalance")
+                # 銘柄は判断した日に決め、比率は約定する日の保有比率から決める（バンド内の銘柄は触らない）
+                execute_target(target_weights(weights, payload, cfg.rebalance_band), d, "rebalance")
 
         # 3) 今日の終値で判断する → 注文（lag 日後に約定）
         todays: list[tuple[int, str, object]] = []
@@ -168,7 +169,7 @@ def run_backtest(
                 halted = False  # 実運用では人が理由を見て再開する。検証では次の月初に再開したとみなす
                 peak = eq
             sel = select_at(feats, prices, d, cfg, sectors)
-            new = {p.ticker: 1.0 / len(sel.picks) for p in sel.picks} if sel.invested else {}
+            new = [p.ticker for p in sel.picks] if sel.invested else []
             # 退出の予定と入れ替えが同じ日なら、入れ替えの目標が優先（退出銘柄は目標に入らない）
             todays = [p for p in todays if p[1] != "exit" or p[2][0] not in new]
             todays.append((i + execution_lag, "target", new))
@@ -180,7 +181,7 @@ def run_backtest(
                     if t in weights:
                         sell(t, d, why)
                 else:
-                    execute_target(payload, d, "rebalance")
+                    execute_target(target_weights(weights, payload, cfg.rebalance_band), d, "rebalance")
         else:
             pending.extend(todays)
         equity.at[d] = eq
@@ -237,4 +238,9 @@ def sweep_variants(base: StrategyConfig) -> list[tuple[str, StrategyConfig]]:
     v += [("業種の上限なし", replace(base, max_per_sector=0))]
     v += [("退出ルールなし", replace(base, exit_below_trend=False, stop_loss=0.0))]
     v += [("遮断器なし", replace(base, portfolio_dd_stop=0.0))]
+    v += [("毎回均等に戻す", replace(base, rebalance_band=0.0))]
     return v
+
+
+def sweep_costs() -> list[tuple[str, float]]:
+    return [("コスト0.1%", 0.001), ("コスト0.3%", 0.003), ("コスト0.5%", 0.005)]

@@ -119,7 +119,8 @@ def daily_step(
         view = Portfolio(cash=pf.cash + sum(o.value for o in rep.exits),
                          positions={t: n for t, n in pf.positions.items() if all(o.ticker != t for o in rep.exits)},
                          avg_cost=dict(pf.avg_cost))
-        rep.rebalance_orders, rep.skipped = plan_orders(view, rep.targets, last, lot=lot, cash_reserve=cash_reserve, names=names)
+        rep.rebalance_orders, rep.skipped = plan_orders(view, rep.targets, last, lot=lot, cash_reserve=cash_reserve,
+                                                        names=names, band=cfg.rebalance_band)
         rep.rebalanced = True
 
     # 5) 注文を出す
