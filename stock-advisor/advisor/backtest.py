@@ -202,7 +202,7 @@ def run_backtest(
                 halted = False  # 実運用では人が理由を見て再開する。検証では次の月初に再開したとみなす
                 peak = eq
             sel = select_at(feats, prices, d, cfg, sectors)
-            targets = [p.ticker for p in sel.picks] if sel.invested else []
+            targets = {p.ticker: p.weight for p in sel.picks} if sel.invested else {}
             # 退出の予定と入れ替えが同じ日なら、入れ替えの目標が優先（退出銘柄は目標に入らない）
             todays = [p for p in todays if p[1] != "exit" or p[2][0] not in targets]
             # 比率は判断した日の保有比率から決める（紙上の口座が判断した日の株価で株数を決めるのと同じ）

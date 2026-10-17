@@ -34,7 +34,7 @@ REPORT_DIR = Path(__file__).resolve().parent.parent / "reports"
 
 
 def _cfg(args) -> StrategyConfig:
-    return StrategyConfig(top_n=args.top, use_regime=args.regime)
+    return StrategyConfig(top_n=args.top, use_regime=args.regime, scoring=args.scoring, weighting=args.weighting)
 
 
 def _load(args, start: str, extra: list[str] | None = None):
@@ -339,11 +339,33 @@ def _cmd_paper(args) -> int:
     return 0
 
 
+# ---------- research ----------
+def cmd_research(args) -> int:
+    from . import research as R
+    names, sectors, prices, bench = _load(args, start=args.start)
+    if bench is None:
+        print("ベンチマークが取れないので検証できません", file=sys.stderr)
+        return 2
+    out = R.run_all(prices, bench, sectors, bootstrap_runs=args.bootstrap, weight_runs=args.weights,
+                    cost=args.cost, split=args.split, log=lambda m: print(m, file=sys.stderr))
+    out["split"] = args.split
+    text = R.report(out, title=f"1000回の検証（{prices.index[0].date()}〜{prices.index[-1].date()}、{len(prices.columns)} 銘柄）")
+    print(text)
+    if args.save:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        outp = REPORT_DIR / f"research-{date.today()}.md"
+        outp.write_text(text, encoding="utf-8")
+        print(f"保存: {outp}", file=sys.stderr)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="advisor", description="株の自動売買ツール（判断と紙上の売買）")
     p.add_argument("--universe", help="銘柄リストのファイル（既定: universe/jp-large.txt）")
     p.add_argument("--top", type=int, default=8, help="持つ銘柄数（既定 8）")
     p.add_argument("--regime", action="store_true", help="日経平均が200日線の下なら全部現金にする（既定では使わない）")
+    p.add_argument("--scoring", choices=["m12", "composite"], default="m12", help="並べ方（m12 = 12-1モメンタムだけ、composite = 合成スコア）")
+    p.add_argument("--weighting", choices=["equal", "invvol"], default="equal", help="比率（equal = 同額、invvol = 逆ボラティリティ）")
     p.add_argument("--synthetic", action="store_true", help="乱数の株価で動かす（動作確認用）")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--refresh", action="store_true", help="キャッシュを使わず取り直す")
@@ -365,6 +387,15 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--lag", type=int, default=1, help="判断から約定までの営業日数（既定 1。0 は判断した日の終値で約定＝楽観的）")
     b.add_argument("--save", action="store_true", help="reports/backtest-equity.csv に保存")
     b.set_defaults(func=cmd_backtest)
+
+    r = sub.add_parser("research", help="1000回の検証（ブートストラップ・重みのランダム化・日取り・開始日・前半後半・格子）")
+    r.add_argument("--start", default="2010-01-01")
+    r.add_argument("--bootstrap", type=int, default=300, help="仮想の歴史の本数（既定 300。3 戦略を走らせるので 900 回）")
+    r.add_argument("--weights", type=int, default=200, help="重みのランダム化の回数")
+    r.add_argument("--split", default="2019-01-01", help="前半/後半の分かれ目")
+    r.add_argument("--cost", type=float, default=0.001)
+    r.add_argument("--save", action="store_true", help="reports/research-<日付>.md に保存")
+    r.set_defaults(func=cmd_research)
 
     pp = sub.add_parser("paper", help="紙上の口座")
     pp.add_argument("--file", help="口座ファイル（既定: data/paper-portfolio.json）")

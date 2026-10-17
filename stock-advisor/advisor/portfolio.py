@@ -131,7 +131,7 @@ def fill_pending(pf: Portfolio, prices: dict[str, float], when: str, *, lot: int
 
 def plan_orders(
     pf: Portfolio,
-    targets: list[str],
+    targets: list[str] | dict[str, float],
     prices: dict[str, float],
     *,
     lot: int = LOT_SIZE,
@@ -149,6 +149,12 @@ def plan_orders(
     names = names or {}
     orders: list[Order] = []
     cash = pf.cash
+    if isinstance(targets, dict):
+        tot_w = sum(targets.values())
+        tw_of = {t: (w / tot_w if tot_w > 0 else 0.0) for t, w in targets.items()}
+        targets = list(targets)
+    else:
+        tw_of = {t: 1.0 / len(targets) for t in targets} if targets else {}
 
     # 1) 対象から外れた銘柄は全部売る
     for t, n in list(pf.positions.items()):
@@ -162,21 +168,25 @@ def plan_orders(
     if not targets:
         return orders, []
 
-    # 2) 目標額から ±band 以内で持っている銘柄はそのまま。残りの資金を、残りの銘柄で分ける
+    # 2) 目標額から ±band 以内で持っている銘柄はそのまま。残りの資金を、残りの銘柄で目標比率に比例して分ける
     total = max(0.0, (cash + sum(n * prices[t] for t, n in pf.positions.items() if t in targets)) - cash_reserve)
-    tw = total / len(targets)
     kept = [t for t in targets if pf.positions.get(t, 0) > 0 and band > 0
-            and abs(pf.positions[t] * prices[t] - tw) <= band * tw]
+            and abs(pf.positions[t] * prices[t] - total * tw_of[t]) <= band * total * tw_of[t]]
     investable = max(0.0, total - sum(pf.positions[t] * prices[t] for t in kept))
     targets = [t for t in targets if t not in kept]
     if not targets:
         return orders, []
-    # 3) 1単元も買えない銘柄を外しながら、均等額を決める。すでに持っている銘柄なら、売らずにそのまま持つ
+
+    def budget(active: list[str]) -> dict[str, float]:
+        ws = sum(tw_of[t] for t in active)
+        return {t: investable * tw_of[t] / ws for t in active} if ws > 0 else {}
+
+    # 3) 1単元も買えない銘柄を外しながら、目標額を決める。すでに持っている銘柄なら、売らずにそのまま持つ
     active = list(targets)
     skipped: list[str] = []
     while active:
-        per = investable / len(active)
-        too_expensive = [t for t in active if prices[t] * lot > per]
+        amt = budget(active)
+        too_expensive = [t for t in active if prices[t] * lot > amt[t]]
         if not too_expensive:
             break
         for t in too_expensive:
@@ -188,8 +198,8 @@ def plan_orders(
         active = [t for t in active if t not in too_expensive]
     if not active:
         return orders, skipped
-    per = investable / len(active)
-    target_shares = {t: int(math.floor(per / prices[t] / lot)) * lot for t in active}
+    amt = budget(active)
+    target_shares = {t: int(math.floor(amt[t] / prices[t] / lot)) * lot for t in active}
 
     # 4) 減らす分を先に売る
     for t, want in target_shares.items():
@@ -206,13 +216,13 @@ def plan_orders(
         buys[biggest] -= lot
         if buys[biggest] <= 0:
             del buys[biggest]
-    # 6) 余った現金で、上位から1単元ずつ足す（均等額の1.5倍まで）
+    # 6) 余った現金で、上位から1単元ずつ足す（目標額の1.5倍まで）
     changed = True
     while changed:
         changed = False
         for t in active:
             held_after = pf.positions.get(t, 0) + buys.get(t, 0)
-            if (held_after + lot) * prices[t] <= 1.5 * per and spend() + lot * prices[t] <= cash - cash_reserve + 1e-6:
+            if (held_after + lot) * prices[t] <= 1.5 * amt[t] and spend() + lot * prices[t] <= cash - cash_reserve + 1e-6:
                 buys[t] = buys.get(t, 0) + lot
                 changed = True
     for t, n in buys.items():

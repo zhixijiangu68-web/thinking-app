@@ -113,6 +113,7 @@ def daily_step(
         sel = select_at(feats, prices, asof, cfg, sectors)
         rep.selection = sel
         rep.targets = [p.ticker for p in sel.picks] if sel.invested else []
+        target_w = {p.ticker: p.weight for p in sel.picks} if sel.invested else {}
         # 退出の予定と入れ替えが同じ日なら、入れ替えの目標が優先（バックテストと同じ扱い）
         rep.dropped_exits = [o.ticker for o in rep.exits if o.ticker in rep.targets]
         rep.exits = [o for o in rep.exits if o.ticker not in rep.targets]
@@ -124,7 +125,7 @@ def daily_step(
         view = Portfolio(cash=pf.cash + sum(o.value for o in rep.exits),
                          positions={t: n for t, n in pf.positions.items() if all(o.ticker != t for o in rep.exits)},
                          avg_cost=dict(pf.avg_cost))
-        rep.rebalance_orders, rep.skipped = plan_orders(view, rep.targets, last, lot=lot, cash_reserve=cash_reserve,
+        rep.rebalance_orders, rep.skipped = plan_orders(view, target_w, last, lot=lot, cash_reserve=cash_reserve,
                                                         names=names, band=cfg.rebalance_band)
         rep.rebalanced = True
 

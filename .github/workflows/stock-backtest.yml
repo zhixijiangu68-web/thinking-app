@@ -9,6 +9,12 @@ on:
       start:
         description: "バックテストの開始日"
         default: "2010-01-01"
+      research:
+        description: "1000回の検証も回す（yes/no）"
+        default: "yes"
+      bootstrap:
+        description: "ブートストラップの本数"
+        default: "300"
 
 permissions:
   contents: write
@@ -16,6 +22,7 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     defaults:
       run:
         working-directory: stock-advisor
@@ -34,7 +41,17 @@ jobs:
             | tee "reports/backtest-$(date -u +%Y-%m-%d).md"
       - name: 今日の候補
         run: python -m advisor screen --save
+      - name: 合成スコアのバックテスト
+        run: |
+          python -m advisor --scoring composite --weighting invvol backtest --start "${{ github.event.inputs.start || '2010-01-01' }}" --by-year \
+            | tee "reports/backtest-composite-$(date -u +%Y-%m-%d).md"
+      - name: 1000回の検証（ブートストラップ・重み・日取り・開始日・前半後半・格子）
+        if: ${{ github.event.inputs.research != 'no' }}
+        run: |
+          python -m advisor research --start "${{ github.event.inputs.start || '2010-01-01' }}" \
+            --bootstrap "${{ github.event.inputs.bootstrap || '300' }}" --save
       - name: 取得できた銘柄の数
+        if: always()
         run: |
           echo "キャッシュ: $(ls data/cache/*.csv | wc -l) 銘柄"
           python - <<'PY'

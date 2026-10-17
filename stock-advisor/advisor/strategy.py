@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from . import signals as S
+
 
 @dataclass
 class StrategyConfig:
@@ -36,6 +38,11 @@ class StrategyConfig:
     portfolio_dd_stop: float = 0.0  # 評価額が最高値から −N% で全部売って止める（0 = 使わない）
     max_missing_days: int = 5       # 株価がこれ以上の営業日とれない銘柄は、最後の値で退出（上場廃止・データ障害）
     rebalance_band: float = 0.25    # 残る銘柄は、目標比率から ±25% 以内なら触らない（無駄な売買を減らす。0 = 毎回均等に戻す）
+    scoring: str = "m12"            # 並べ方: "m12"（12-1モメンタムだけ）か "composite"（合成スコア。docs/composite-20261017.md）
+    score_weights: dict | None = None   # composite の重み（None = signals.DEFAULT_WEIGHTS）
+    weighting: str = "equal"        # 比率: "equal"（同額）か "invvol"（逆ボラティリティ、上限 max_weight・下限 min_weight）
+    max_weight: float = 0.20
+    min_weight: float = 0.05
 
     @property
     def min_history(self) -> int:
@@ -48,6 +55,7 @@ class Features:
     trend_ok: pd.DataFrame
     vol: pd.DataFrame
     regime_ok: pd.Series  # 日付ごとに True/False
+    score: pd.DataFrame | None = None   # composite のとき
 
 
 @dataclass
@@ -58,6 +66,7 @@ class Pick:
     vol: float
     price: float
     sector: str = ""
+    weight: float = 0.0   # 目標比率
 
 
 @dataclass
@@ -85,7 +94,11 @@ def compute_features(prices: pd.DataFrame, bench: pd.Series | None, cfg: Strateg
         regime_ok = (b > bsma) & bsma.notna()
     else:
         regime_ok = pd.Series(True, index=px.index)
-    return Features(momentum=mom, trend_ok=trend_ok, vol=vol, regime_ok=regime_ok)
+    score = None
+    if cfg.scoring == "composite":
+        comps = S.compute_components(px, bench, mom_lookback=cfg.mom_lookback, mom_skip=cfg.mom_skip, vol_window=cfg.vol_window)
+        score = S.composite_score(comps, cfg.score_weights)
+    return Features(momentum=mom, trend_ok=trend_ok, vol=vol, regime_ok=regime_ok, score=score)
 
 
 def rank_at(feats: Features, prices: pd.DataFrame, asof: pd.Timestamp, cfg: StrategyConfig) -> pd.DataFrame:
@@ -102,7 +115,11 @@ def rank_at(feats: Features, prices: pd.DataFrame, asof: pd.Timestamp, cfg: Stra
         & (df["vol"] <= cfg.max_vol)
         & (df["momentum"] > 0)
     )
-    df["score"] = df["momentum"]
+    if feats.score is not None:
+        df["score"] = feats.score.loc[asof]
+        df["eligible"] &= df["score"].notna()
+    else:
+        df["score"] = df["momentum"]
     return df.sort_values("score", ascending=False)
 
 
@@ -141,6 +158,13 @@ def select_at(
         picks.append(Pick(ticker=t, score=float(r.score), momentum=float(r.momentum),
                           vol=float(r.vol), price=float(r.price), sector=sec))
     reason = "" if picks else "条件を満たす銘柄がない（上昇トレンドかつ12-1モメンタムがプラスの銘柄なし）ので現金"
+    if picks:
+        if cfg.weighting == "invvol":
+            w = S.inverse_vol_weights(pd.Series({p.ticker: p.vol for p in picks}), cfg.max_weight, cfg.min_weight)
+        else:
+            w = {p.ticker: 1.0 / len(picks) for p in picks}
+        for p in picks:
+            p.weight = w.get(p.ticker, 0.0)
     return Selection(asof=asof, invested=bool(picks), picks=picks, eligible=int(len(elig)),
                      reason=reason, sector_skipped=skipped)
 
@@ -185,16 +209,21 @@ def exit_signals(
     return out
 
 
-def target_weights(current: dict[str, float], targets: list[str], band: float) -> dict[str, float]:
-    """入れ替え日の目標比率。残る銘柄は目標（1/N）から ±band 以内なら今の比率のまま、
-    それ以外（新しい銘柄・はみ出た銘柄）で残りを均等に分ける。current は評価額に対する比率。"""
+def target_weights(current: dict[str, float], targets: dict[str, float] | list[str], band: float) -> dict[str, float]:
+    """入れ替え日の目標比率。targets は {銘柄: 目標比率}（list なら同額）。
+    残る銘柄は自分の目標から ±band 以内なら今の比率のまま、それ以外（新しい銘柄・はみ出た銘柄）で
+    残りを目標比率に比例して分ける。current は評価額に対する比率。"""
     if not targets:
         return {}
-    tw = 1.0 / len(targets)
-    kept = {t: current[t] for t in targets if t in current and band > 0 and abs(current[t] - tw) <= band * tw}
-    rest = [t for t in targets if t not in kept]
+    if isinstance(targets, (list, tuple)):
+        targets = {t: 1.0 / len(targets) for t in targets}
+    tot = sum(targets.values())
+    targets = {t: w / tot for t, w in targets.items()} if tot > 0 else targets
+    kept = {t: current[t] for t, tw in targets.items() if t in current and band > 0 and abs(current[t] - tw) <= band * tw}
+    rest = {t: tw for t, tw in targets.items() if t not in kept}
     out = dict(kept)
     if rest:
-        each = max(0.0, 1.0 - sum(kept.values())) / len(rest)
-        out.update({t: each for t in rest})
+        room = max(0.0, 1.0 - sum(kept.values()))
+        rs = sum(rest.values())
+        out.update({t: room * tw / rs for t, tw in rest.items()})
     return out
