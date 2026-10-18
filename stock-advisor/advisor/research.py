@@ -275,7 +275,7 @@ def verdict_sizing(out: dict) -> tuple[list[tuple[str, bool, str]], bool, list[t
     tr_range = float(H["cagr"].max() - H["cagr"].min())
     med_diff = float(H["cagr"].median() - C["cagr"].median())
     checks2 = [
-        (f"年率の幅: 1列 {single_range:.1%} → 4列 {tr_range:.1%}（半分以下）", bool(tr_range <= single_range / 2), ""),
+        (f"年率の幅: 1列 {single_range:.1%} → 4列 {tr_range:.1%}（半分以下。4つの平均なので幅が縮むのは当然で、これは実装の確認）", bool(tr_range <= single_range / 2), ""),
         (f"年率の中央値の差 {med_diff:+.1%}（±1 ポイント）", bool(abs(med_diff) <= 0.01), ""),
     ]
     pass2 = all(ok for _, ok, _ in checks2)

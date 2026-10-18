@@ -202,7 +202,7 @@ def test_sleeve_helpers():
     idx = pd.bdate_range("2024-01-01", "2024-03-31")
     tdm = trading_day_of_month(idx)
     assert tdm.iloc[0] == 0 and tdm.loc["2024-02-01"] == 0 and tdm.iloc[5] == 5 and tdm.loc["2024-03-01"] == 0
-    assert [sleeve_due_day(k, 4) for k in range(4)] == [0, 5, 10, 15]
+    assert [sleeve_due_day(k, 4) for k in range(4)] == [0, 5, 10, 14]
     assert sleeve_due_day(0, 1) == 0
     w = combine_sleeves({0: {"A": 0.5, "B": 0.5}, 1: {"A": 0.5, "C": 0.25}}, 2)
     assert w == {"A": 0.5, "B": 0.25, "C": 0.125}
@@ -250,3 +250,62 @@ def test_tranche_fast_close_to_full(data):
     a = fast["equity"]; c = full.equity.reindex(a.index)
     # 高速版は4列を別々の資金で持つ近似。全体で一つの口座にする本番の手順とは数%ずれてよい
     assert abs(fast["metrics"]["cagr"] - full.metrics["cagr"]) < 0.03
+
+
+# ---------- 2回目のレビューで見つかった点 ----------
+def test_plan_orders_trims_held_position_when_budget_below_one_lot():
+    """予算が1単元を下回る保有銘柄は、1単元だけ残す（または全部売る）。口座が目標より多く投資されたままにならない。"""
+    px = {f"S{i}": 5000.0 for i in range(20)}
+    pf = Portfolio(cash=0, positions={"S0": 2000, "S1": 2000}, avg_cost={"S0": 5000.0, "S1": 5000.0})
+    targets = {f"S{i}": 0.02 for i in range(20)}        # 合計 0.4 = 現金 60% を残す
+    orders, skipped = plan_orders(pf, targets, px, lot=100, band=0.0)
+    sim = Portfolio(cash=pf.cash, positions=dict(pf.positions), avg_cost=dict(pf.avg_cost))
+    PaperBroker(sim).execute(orders)
+    equity = sim.cash + sum(n * px[t] for t, n in sim.positions.items())
+    invested = sum(n * px[t] for t, n in sim.positions.items())
+    assert invested <= 0.4 * equity + 100 * 5000 * 2 + 1e-6      # 目標 40% + 丸め（1単元×2）まで
+    assert all(o.ticker in ("S0", "S1") and o.side == "sell" for o in orders if o.side == "sell")
+
+
+from advisor.broker import PaperBroker  # noqa: E402
+
+
+def test_sleeves_with_breaker_engines_agree(data):
+    px, b = data
+    cfg = StrategyConfig(top_n=5, sleeves=4, portfolio_dd_stop=0.15)
+    f = compute_features(px, b, cfg)
+    bt = run_backtest(px, b, cfg, cost=0.0)
+    sim, _ = simulate_paper(px, f, cfg, cash=1e9, lot=1, start=bt.equity.index[0])
+    ratio = (sim / sim.iloc[0]) / (bt.equity / bt.equity.iloc[0])
+    # 遮断器のしきい値と4列の境界判断が重なるので差は出るが、直す前は 33% だった。論理は同じ
+    assert (ratio - 1).abs().max() < 0.10
+
+
+def test_manual_rebalance_keeps_sleeve_stagger(data):
+    px, b = data
+    cfg = StrategyConfig(top_n=5, sleeves=4)
+    f = compute_features(px, b, cfg)
+    pf = Portfolio(cash=1e8, peak_equity=1e8)
+    idx = px.index
+    month = idx[-40].to_period("M")
+    days = [d for d in idx if d.to_period("M") == month]
+    for d in (days[0], days[5], days[10]):
+        daily_step(pf, cfg, f, px, d, lot=1, fill_now=True)
+    before = {k: dict(v) for k, v in pf.sleeves.items()}
+    r = daily_step(pf, cfg, f, px, days[12], lot=1, fill_now=True, rebalance=True)   # 手で入れ替え
+    assert r.sleeves_refreshed == [2]                        # いちばん最近の列だけ
+    assert pf.sleeves["0"] == before["0"] and pf.sleeves["1"] == before["1"]
+
+
+def test_old_portfolio_file_not_rebalanced_twice_in_month(data):
+    px, b = data
+    cfg = StrategyConfig(top_n=5, sleeves=4)
+    f = compute_features(px, b, cfg)
+    d = px.index[-1]
+    pf = Portfolio(cash=1e8, peak_equity=1e8, last_rebalance=str(d.date()))   # 古い形式: 今月すでに入れ替え済み
+    r = daily_step(pf, cfg, f, px, d, lot=1)
+    assert not r.rebalanced and all(v == str(d.date())[:7] for v in pf.sleeve_month.values())
+
+
+def test_sleeve_due_day_capped():
+    assert [sleeve_due_day(k, 4) for k in range(4)] == [0, 5, 10, 14]

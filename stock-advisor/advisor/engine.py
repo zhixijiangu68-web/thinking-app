@@ -112,15 +112,19 @@ def daily_step(
     month = when[:7]
     in_month = prices.index[(prices.index <= asof) & (prices.index.to_period("M") == asof.to_period("M"))]
     tdm = len(in_month) - 1
+    if not pf.sleeve_month and pf.last_rebalance[:7] == month:
+        # 古い口座ファイル（列の記録がない）で今月すでに入れ替えていたら、全部の列を入れ替え済みとみなす（二重にしない）
+        for k in range(n_sleeves):
+            pf.sleeve_month[str(k)] = month
     if rebalance is True:
-        due = list(range(n_sleeves))
+        # 手で入れ替え: いちばん最近の入れ替え日を過ぎた列だけを入れ替え直す（他の列はそのまま。列のずらしを壊さない）
+        passed = [k for k in range(n_sleeves) if tdm >= sleeve_due_day(k, n_sleeves)]
+        due = [max(passed)] if passed else [0]
     elif rebalance is False:
         due = []
     else:
         due = [k for k in range(n_sleeves)
                if tdm >= sleeve_due_day(k, n_sleeves) and pf.sleeve_month.get(str(k)) != month]
-        if n_sleeves == 1 and not pf.sleeve_month and pf.last_rebalance[:7] == month:
-            due = []   # 古い口座ファイル（列の記録がない）で、今月すでに入れ替えていたら二重にしない
     do_rebalance = bool(due) and not rep.breaker
     if do_rebalance:
         sel = select_at(feats, prices, asof, cfg, sectors)

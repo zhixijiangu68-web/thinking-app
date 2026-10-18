@@ -75,7 +75,7 @@ def yearly_table(equity: pd.Series, bench_eq: pd.Series | None, uni_eq: pd.Serie
 
 def equal_weight_equity(prices: pd.DataFrame, days: pd.DatetimeIndex) -> pd.Series:
     """候補の全銘柄を毎日均等に持ったときの評価額（株価のない銘柄はその日は除く）。"""
-    r = prices.pct_change().loc[days].mean(axis=1).fillna(0.0)
+    r = prices.ffill().pct_change().loc[days].mean(axis=1).fillna(0.0)
     return (1 + r).cumprod()
 
 
@@ -131,6 +131,7 @@ def run_backtest(
     entry: dict[str, float] = {}     # ticker -> 取得値
     eq, peak = 1.0, 1.0
     halted = False
+    halted_month = ""
     equity = pd.Series(np.nan, index=days)
     trades: list[dict] = []
     counts = {"trend": 0, "stop": 0, "missing": 0, "dd_stop": 0}   # 約定した退出の回数（銘柄ごと）
@@ -199,6 +200,7 @@ def run_backtest(
         if cfg.portfolio_dd_stop and weights and eq / peak - 1 <= -cfg.portfolio_dd_stop and not halted:
             todays = [(i + execution_lag, "exit", (t, "dd_stop")) for t in weights]
             halted = True
+            halted_month = str(d.to_period("M"))
             fired_today = True
 
         if cfg.sleeves > 1 and freq == "M":
@@ -210,9 +212,11 @@ def run_backtest(
         else:
             due = [0]
             rebalance_today = d in rb
+        if halted and not fired_today and str(d.to_period("M")) == halted_month:
+            rebalance_today = False   # 止まった月は入れ替えない（紙上の口座と同じ。翌月に人が再開したとみなす）
         if rebalance_today and not fired_today:
             if halted:
-                halted = False  # 実運用では人が理由を見て再開する。検証では次の月初に再開したとみなす
+                halted = False  # 実運用では人が理由を見て再開する。検証では翌月に再開したとみなす
                 peak = eq
             sel = select_at(feats, prices, d, cfg, sectors)
             for k in due:

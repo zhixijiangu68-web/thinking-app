@@ -192,9 +192,18 @@ def plan_orders(
         if not too_expensive:
             break
         for t in too_expensive:
-            if pf.positions.get(t, 0) > 0:
-                kept.append(t)
-                investable = max(0.0, investable - pf.positions[t] * prices[t])
+            have = pf.positions.get(t, 0)
+            if have > 0:
+                # 予算が1単元に満たない保有銘柄: 1単元だけ残す（それも予算の1.5倍を超えるなら全部売る）。
+                # 残さないと、現金の予算（ボラ目標）や列の比率より多く投資したままになる
+                keep = lot if lot * prices[t] <= 1.5 * amt[t] else 0
+                keep = min(keep, have)
+                if have - keep > 0:
+                    orders.append(Order(t, "sell", have - keep, prices[t], reason="比率を下げる"))
+                    cash += (have - keep) * prices[t]
+                if keep > 0:
+                    kept.append(t)
+                    investable = max(0.0, investable - keep * prices[t])
             else:
                 skipped.append(t)
         active = [t for t in active if t not in too_expensive]
@@ -212,6 +221,7 @@ def plan_orders(
 
     # 5) 増やす分を買う。使える現金は「株に充てる予算 − いま active に入っている分」まで（ボラ目標の現金は残す）
     in_active = sum(min(pf.positions.get(t, 0), target_shares[t]) * prices[t] for t in active)
+    kept_value_sold = 0.0
     buy_cap = max(0.0, min(cash - cash_reserve, investable - in_active))
     buys = {t: want - pf.positions.get(t, 0) for t, want in target_shares.items() if want > pf.positions.get(t, 0)}
     spend = lambda: sum(n * prices[t] for t, n in buys.items())

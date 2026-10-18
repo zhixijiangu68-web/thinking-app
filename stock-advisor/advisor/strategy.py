@@ -259,8 +259,8 @@ def trading_day_of_month(index: pd.DatetimeIndex) -> pd.Series:
 
 
 def sleeve_due_day(k: int, sleeves: int) -> int:
-    """列 k が入れ替える日（月の営業日目）。4 列なら 0, 5, 10, 15。"""
-    return k * (20 // max(sleeves, 1))
+    """列 k が入れ替える日（月の営業日目）。4 列なら 0, 5, 10, 14（営業日が 15 日しかない月でも最後の列が回るよう 14 まで）。"""
+    return min(k * (20 // max(sleeves, 1)), 14)
 
 
 def combine_sleeves(sleeves: dict[int, dict[str, float]], n: int) -> dict[str, float]:

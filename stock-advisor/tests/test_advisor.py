@@ -468,10 +468,14 @@ def test_band_reduces_trades_and_keeps_engines_consistent():
 def test_plan_orders_band_keeps_positions_within_band():
     pf = Portfolio(cash=0, positions={"A": 100, "B": 100}, avg_cost={"A": 1000.0, "B": 1000.0})
     px = {"A": 1100.0, "B": 900.0, "C": 500.0}
-    # 合計 200,000、目標 1/3 ≈ 66,667。A=110,000, B=90,000 は ±25% の外だが、1単元が目標額より高いので
-    # 売って減らすことはできない（0 か 100 株）→ そのまま持つ。C は資金が残らず買えない
+    # 合計 200,000、目標 1/3 ≈ 66,667。A=110,000 は1単元が目標の1.5倍を超えるので全部売る。
+    # B=90,000 は1単元だけ残す。売った現金で C を買う（目標に近づける）
     orders, skipped = plan_orders(pf, ["A", "B", "C"], px, lot=100, band=0.25)
-    assert orders == [] and skipped == ["C"]
+    by = {o.ticker: o for o in orders}
+    assert by["A"].side == "sell" and by["A"].shares == 100
+    assert "B" not in by and by["C"].side == "buy" and by["C"].shares % 100 == 0
+    sim = Portfolio(cash=0, positions=dict(pf.positions), avg_cost=dict(pf.avg_cost)); PaperBroker(sim).execute(orders)
+    assert sim.cash >= 0
     # 単元が 1 株なら、A と B を減らして C を買う
     orders1, _ = plan_orders(pf, ["A", "B", "C"], px, lot=1, band=0.25)
     assert {o.ticker for o in orders1} == {"A", "B", "C"} and all(o.side == "buy" for o in orders1 if o.ticker == "C")
