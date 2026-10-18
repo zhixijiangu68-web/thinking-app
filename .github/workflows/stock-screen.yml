@@ -31,7 +31,7 @@ jobs:
       - name: 紙上の口座を回す（data/paper-portfolio.json がコミットされているときだけ。4列の分割入れ替えなので毎日回す）
         run: |
           if [ -f data/paper-portfolio.json ]; then
-            python -m advisor paper auto --save
+            python -m advisor paper auto --lot 1 --save   # 50 万円の口座なので 1 株単位（単元未満株）
           else
             echo "紙上の口座なし（paper init して data/paper-portfolio.json をコミットすると回る）"
           fi

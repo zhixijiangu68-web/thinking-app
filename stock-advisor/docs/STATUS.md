@@ -21,7 +21,7 @@
 ## 毎日動いているもの
 
 - `.github/workflows/stock-screen.yml`: 平日 17:10 JST（既定のブランチに入ってから）。候補を `reports/<日付>.md`、紙上の口座の売買を `reports/<日付>-paper.md` に残し、`data/paper-portfolio.json` を更新してコミット
-- 紙上の口座: 2026-10-17 開設、現金 500 万円。最初の注文は 6 銘柄（2 銘柄は 1 単元が予算を超えて見送り）
+- 紙上の口座: 2026-10-18 に **50 万円・1 株単位（単元未満株を想定）** で作り直した（オーナーの方針: 資金は 50 万円）。到達のメソッドは `docs/method-500k-20261018.md`
 - `.github/workflows/stock-backtest.yml`: 手動（Actions の Run workflow）で、実データのバックテストと 1000 回超の検証を `reports/` に残す
 
 ## 決めたこと・やらないこと
