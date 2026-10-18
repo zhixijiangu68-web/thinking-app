@@ -298,7 +298,7 @@ def _cmd_paper(args) -> int:
         if path.exists() and not args.force:
             print(f"すでにあります: {path}（作り直すなら --force）", file=sys.stderr)
             return 1
-        Portfolio(cash=float(args.cash), peak_equity=float(args.cash)).save(path)
+        Portfolio(cash=float(args.cash), peak_equity=float(args.cash), initial_cash=float(args.cash)).save(path)
         print(f"紙上の口座を作りました: 現金 {args.cash:,.0f}円 → {path}")
         return 0
 
@@ -335,6 +335,12 @@ def _cmd_paper(args) -> int:
         if pf.halted:
             print(f"- **遮断器で停止中**: {pf.halted_reason}")
         print(f"- 最後の入れ替え: {pf.last_rebalance or 'まだ'}")
+        if pf.initial_cash > 0:
+            pl = eq - pf.initial_cash
+            days = max(1, (asof - pd.Timestamp(pf.created[:10])).days)
+            pace = pl / days * 365
+            print(f"- 開設からの損益: {pl:+,.0f}円（{pl / pf.initial_cash:+.1%}、{days} 日）。年率換算 {pace:+,.0f}円 / 目標 {args.goal:,.0f}円 = {pace / args.goal:.0%}"
+                  + "（3〜5年の平均で見る。1年では運が大きい）")
         if pf.pending:
             print("- 約定待ち: " + ", ".join(f"{p['side']} {p['ticker']} {p['shares']}株" for p in pf.pending))
         for line in _sanity_lines(prices.loc[:, [t for t in pf.positions if t in prices.columns]] if pf.positions else prices.iloc[:, :0]):
@@ -436,7 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
         q.add_argument("--lot", type=int, default=100, help="売買の単位（既定 100株。単元未満株なら 1）")
         q.add_argument("--fill-now", action="store_true", help="今日の終値で約定させる（既定は翌営業日の終値）")
         q.add_argument("--save", action="store_true", help="出力を reports/<日付>.md に追記する")
-    ps.add_parser("status")
+    st = ps.add_parser("status"); st.add_argument("--goal", type=float, default=5_000_000, help="年間の利益の目標（既定 500 万円）")
     pr = ps.add_parser("resume"); pr.add_argument("--why", required=True, help="再開する理由（記録に残す）")
     pp.set_defaults(func=cmd_paper)
     return p
